@@ -1,6 +1,6 @@
 # fastSwan: XFRM offload via XDP
 
-<img width="20%" src="https://www.fastswan.org/assets/logo.png" align="left"/>
+<img width="40%" src="https://www.fastswan.org/assets/logo.png" align="left"/>
 is a routing software written in C. The main goal of this project is to provide a fast data-path for the Linux Kernel XFRM layer. Some NIC vendors offer IPSEC acceleration via a Crypto mode or a Packet mode. In Packet mode, all IPSEC ESP operations are done by the hardware to offload the kernel for crypto and packet handling. To further increase perfs we implement kernel routing offload via XDP. A XFRM kernel netlink reflector is dynamically and transparently mirroring kernel XFRM policies to the XDP layer for kernel netstack bypass. fastSwan is an XFRM offload feature.
 
 fastSwan is free software; you can redistribute it and/or modify it under the terms of the GNU Affero General Public License Version 3.0 as published by the Free Software Foundation.
