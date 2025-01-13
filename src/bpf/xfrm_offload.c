@@ -44,9 +44,9 @@
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
-        __uint(key_size, sizeof(struct ipv4_lpm_key));
-        __uint(value_size, sizeof(struct ipv4_xfrm_policy));	
-        __uint(max_entries, 1024);
+	__uint(key_size, sizeof(struct ipv4_lpm_key));
+	__uint(value_size, sizeof(struct ipv4_xfrm_policy));
+	__uint(max_entries, 1024);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } ipv4_xfrm_policy_lpm SEC(".maps");
 
@@ -108,7 +108,7 @@ ip_decrease_ttl(struct iphdr *iph)
 static __always_inline int
 xfrm_fib_lookup(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph)
 {
-        struct bpf_fib_lookup fib_params;
+	struct bpf_fib_lookup fib_params;
 	int ret;
 
 	__builtin_memset(&fib_params, 0, sizeof(fib_params));
@@ -150,13 +150,13 @@ xdp_xfrm_offload(struct parse_pkt *pkt)
 	void *data = (void *) (long) pkt->ctx->data;
 	struct ipv4_xfrm_policy *p;
 	struct ipv4_lpm_key k;
-        struct ethhdr *ethh;
-        struct iphdr *iph;
+	struct ethhdr *ethh;
+	struct iphdr *iph;
 
-        ethh = data;
-        iph = data + pkt->l3_offset;
-        if (iph + 1 > data_end)
-                return XDP_PASS;
+	ethh = data;
+	iph = data + pkt->l3_offset;
+	if (iph + 1 > data_end)
+		return XDP_PASS;
 
 	/* FIXME: Add support to IPv6 */
 	if (ethh->h_proto != bpf_htons(ETH_P_IP))
