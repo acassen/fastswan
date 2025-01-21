@@ -49,6 +49,8 @@ fswan_bpf_xfrm_map_load(fswan_bpf_opts_t *opts)
 
 	/* MAP ref for faster access */
 	opts->bpf_maps = MALLOC(sizeof(fswan_bpf_maps_t) * FSWAN_BPF_MAP_CNT);
+	if (!opts->bpf_maps)
+		return -1;
 
 	err = (err) ? : fswan_bpf_map_load(opts, "ipv4_xfrm_policy_lpm", FSWAN_BPF_MAP_IPV4_LPM);
 	err = (err) ? : fswan_bpf_map_load(opts, "xfrm_offload_stats_hash", FSWAN_BPF_MAP_STATS_HASH);
@@ -218,11 +220,12 @@ fswan_xfrm_policy_vty(vty_t *vty)
 		}
 
 		vty_out(vty, " src %u.%u.%u.%u/%u dst %u.%u.%u.%u/%u dir %s dev %s%s"
+			     "   pkts:%lld bytes:%lld%s"
 			   , NIPQUAD(p->src_pfx), inet_masktocidr(p->src_pfx_mask)
 			   , NIPQUAD(key.pfx), key.pfx_len
 			   , (p->flags & XFRM_POLICY_FL_INGRESS) ? "in" : "out"
-			   , if_indextoname(p->ifindex, ifname)
-			   , VTY_NEWLINE);
+			   , if_indextoname(p->ifindex, ifname), VTY_NEWLINE
+			   , p->pkts, p->bytes, VTY_NEWLINE);
 	}
 
 	FREE(p);

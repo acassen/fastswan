@@ -27,7 +27,7 @@
 #define LOG_FACILITY_MAX        7
 #define PROG                    "fastswan"
 #define PROG_PID_FILE		"/var/run/fastswan.pid"
-#define VERSION_STRING PROG	" v1.0.0 (2025/01/01)"
+#define VERSION_STRING PROG	" v1.0.1 (2025/01/21)"
 #define COPYRIGHT_STRING	"Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>"
 
 

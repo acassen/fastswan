@@ -38,7 +38,10 @@ enum {
 struct ipv4_xfrm_policy {
 	__be32	src_pfx_mask;
 	__be32	src_pfx;
-	__u32	ifindex;		
+	__u32	ifindex;
+
+	__u64	pkts;
+	__u64	bytes;
 
 	__u8	flags;
 } __attribute__ ((__aligned__(8)));

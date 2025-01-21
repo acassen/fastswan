@@ -63,10 +63,13 @@ struct {
  *	Stats related
  */
 static __always_inline int
-xfrm_stats_update(struct xdp_md *ctx, int ifindex_egress)
+xfrm_stats_update(struct xdp_md *ctx, int ifindex_egress, struct ipv4_xfrm_policy *p)
 {
 	struct xfrm_offload_stats *ingress_stats, *egress_stats;
 	__u32 ifindex_ingress = ctx->ingress_ifindex;
+
+	p->pkts++;
+	p->bytes += (ctx->data_end - ctx->data);
 
 	ingress_stats = bpf_map_lookup_elem(&xfrm_offload_stats_hash, &ifindex_ingress);
 	if (!ingress_stats)
@@ -106,7 +109,7 @@ ip_decrease_ttl(struct iphdr *iph)
  *	FIB lookup
  */
 static __always_inline int
-xfrm_fib_lookup(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph)
+xfrm_fib_lookup(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph, struct ipv4_xfrm_policy *p)
 {
 	struct bpf_fib_lookup fib_params;
 	int ret;
@@ -132,7 +135,7 @@ xfrm_fib_lookup(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph)
 
 	/* IPv4 Header TTL playground */
 	ip_decrease_ttl(iph);
-	xfrm_stats_update(ctx, fib_params.ifindex);
+	xfrm_stats_update(ctx, fib_params.ifindex, p);
 
 	if (ctx->ingress_ifindex == fib_params.ifindex)
 		return XDP_TX;
@@ -179,7 +182,7 @@ xdp_xfrm_offload(struct parse_pkt *pkt)
 	 * offload settings. */
 	if (p->flags & XFRM_POLICY_FL_EGRESS) {
 		ip_decrease_ttl(iph);
-		xfrm_stats_update(pkt->ctx, p->ifindex);
+		xfrm_stats_update(pkt->ctx, p->ifindex, p);
 
 		if (pkt->ctx->ingress_ifindex == p->ifindex)
 			return XDP_TX;
@@ -187,7 +190,7 @@ xdp_xfrm_offload(struct parse_pkt *pkt)
 		return bpf_redirect(p->ifindex, 0);
 	}
 
-	return xfrm_fib_lookup(pkt->ctx, ethh, iph);
+	return xfrm_fib_lookup(pkt->ctx, ethh, iph, p);
 }
 
 /*
