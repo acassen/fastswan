@@ -34,6 +34,7 @@ enum {
 
 #define XFRM_POLICY_FL_INGRESS	(1 << 0)
 #define XFRM_POLICY_FL_EGRESS	(1 << 1)
+#define XFRM_POLICY_FL_NO_STATS	(1 << 2)
 
 struct ipv4_xfrm_policy {
 	__be32	src_pfx_mask;

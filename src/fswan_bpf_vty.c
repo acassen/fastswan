@@ -155,6 +155,48 @@ DEFUN(load_existing_xfrm_policy,
 	return CMD_SUCCESS;
 }
 
+DEFUN(disable_xdp_xfrm_offload_stats,
+      disable_xdp_xfrm_stats_offload_cmd,
+      "disable-xdp-xfrm-offload-statistics",
+      "Disable XDP XFRM Offload statistics counters\n")
+{
+	if (!__test_bit(FSWAN_FL_XDP_XFRM_LOADED_BIT, &daemon_data->flags)) {
+		vty_out(vty, "%% XDP XFRM offload is not configured. Ignoring%s"
+			   , VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+
+	if (__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags)) {
+		vty_out(vty, "%% XDP XFRM Statistics already disabled. Ignoring%s"
+			   , VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+
+	__set_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags);
+	return CMD_SUCCESS;
+}
+
+DEFUN(no_disable_xdp_xfrm_offload_stats,
+      no_disable_xdp_xfrm_stats_offload_cmd,
+      "no disable-xdp-xfrm-offload-statistics",
+      "Enable XDP XFRM Offload statistics counters\n")
+{
+	if (!__test_bit(FSWAN_FL_XDP_XFRM_LOADED_BIT, &daemon_data->flags)) {
+		vty_out(vty, "%% XDP XFRM offload is not configured. Ignoring%s"
+			   , VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+
+	if (!__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags)) {
+		vty_out(vty, "%% XDP XFRM Statistics already enabled. Ignoring%s"
+			   , VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+
+	__clear_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags);
+	return CMD_SUCCESS;
+}
+
 DEFUN(show_xdp_xfrm_offload_policy,
       show_xdp_xfrm_offload_policy_cmd,
       "show xdp xfrm offload policy",
@@ -241,10 +283,11 @@ bpf_config_write(vty_t *vty)
 		fswan_bpf_opts_config_write(vty, opts);
 	vty_out(vty, "!%s", VTY_NEWLINE);
 
-	if (__test_bit(FSWAN_FL_XFRM_KERNEL_LOADED_BIT, &daemon_data->flags)) {
+	if (__test_bit(FSWAN_FL_XFRM_KERNEL_LOADED_BIT, &daemon_data->flags))
 		vty_out(vty, "load-existing-xfrm-policy%s", VTY_NEWLINE);
-		vty_out(vty, "!%s", VTY_NEWLINE);
-	}
+	if (__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags))
+		vty_out(vty, "disable-xdp-xfrm-offload-statistics%s", VTY_NEWLINE);
+	vty_out(vty, "!%s", VTY_NEWLINE);
 
 	return CMD_SUCCESS;
 }
@@ -267,6 +310,8 @@ fswan_bpf_vty_init(void)
 
 	/* Install global configuration commands */
 	install_element(CONFIG_NODE, &load_existing_xfrm_policy_cmd);
+	install_element(CONFIG_NODE, &disable_xdp_xfrm_stats_offload_cmd);
+	install_element(CONFIG_NODE, &no_disable_xdp_xfrm_stats_offload_cmd);
 
 	/* Install show commands */
 	install_element(VIEW_NODE, &show_xdp_xfrm_offload_policy_cmd);

@@ -68,6 +68,9 @@ xfrm_stats_update(struct xdp_md *ctx, int ifindex_egress, struct ipv4_xfrm_polic
 	struct xfrm_offload_stats *ingress_stats, *egress_stats;
 	__u32 ifindex_ingress = ctx->ingress_ifindex;
 
+	if (p->flags & XFRM_POLICY_FL_NO_STATS)
+		return 0;
+
 	p->pkts++;
 	p->bytes += (ctx->data_end - ctx->data);
 

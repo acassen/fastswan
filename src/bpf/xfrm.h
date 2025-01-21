@@ -62,6 +62,7 @@ struct ipv4_xfrm_policy {
 } __attribute__ ((__aligned__(8)));
 #define XFRM_POLICY_FL_INGRESS	(1 << 0)
 #define XFRM_POLICY_FL_EGRESS	(1 << 1)
+#define XFRM_POLICY_FL_NO_STATS	(1 << 2)
 
 struct xfrm_offload_stats {
 	__u32	ifindex;

@@ -103,6 +103,8 @@ fswan_bpf_xfrm_policy_set(xfrm_policy_t *p, struct ipv4_xfrm_policy *n)
 		n->flags |= XFRM_POLICY_FL_INGRESS;
 	if (__test_bit(XFRM_POLICY_FL_OUT_BIT, &p->flags))
 		n->flags |= XFRM_POLICY_FL_EGRESS;
+	if (__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags))
+		n->flags |= XFRM_POLICY_FL_NO_STATS;
 	return 0;
 }
 
@@ -220,12 +222,14 @@ fswan_xfrm_policy_vty(vty_t *vty)
 		}
 
 		vty_out(vty, " src %u.%u.%u.%u/%u dst %u.%u.%u.%u/%u dir %s dev %s%s"
-			     "   pkts:%lld bytes:%lld%s"
 			   , NIPQUAD(p->src_pfx), inet_masktocidr(p->src_pfx_mask)
 			   , NIPQUAD(key.pfx), key.pfx_len
 			   , (p->flags & XFRM_POLICY_FL_INGRESS) ? "in" : "out"
-			   , if_indextoname(p->ifindex, ifname), VTY_NEWLINE
-			   , p->pkts, p->bytes, VTY_NEWLINE);
+			   , if_indextoname(p->ifindex, ifname), VTY_NEWLINE);
+
+		if (!__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags))
+			vty_out(vty, "   pkts:%lld bytes:%lld%s"
+				   , p->pkts, p->bytes, VTY_NEWLINE);
 	}
 
 	FREE(p);
@@ -372,6 +376,11 @@ fswan_xfrm_stats_vty(vty_t *vty)
 {
 	list_head_t *l = &daemon_data->bpf_progs;
 	fswan_bpf_opts_t *opts;
+
+	if (__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags)) {
+		vty_out(vty, "%% Statistics are currently disabled...%s", VTY_NEWLINE);
+		return 0;
+	}
 
 	fswan_if_stats_reset();
 	list_for_each_entry(opts, l, next)
