@@ -193,6 +193,55 @@ fswan_bpf_xfrm_action(int action, xfrm_policy_t *p)
 	return 0;
 }
 
+static int
+fswan_xfrm_policy_counters_vty(vty_t *vty, fswan_bpf_opts_t *opts, struct ipv4_xfrm_policy *p)
+{
+	if (!opts || !p)
+		return 0;
+
+	vty_out(vty, "   %s:\tpkts:%lld bytes:%lld%s", opts->label, p->pkts, p->bytes, VTY_NEWLINE);
+	return 0;
+}
+
+static int
+fswan_xfrm_policy_stats_vty(vty_t *vty, fswan_bpf_opts_t *o, struct ipv4_lpm_key *key, struct ipv4_xfrm_policy *policy)
+{
+	list_head_t *l = &daemon_data->bpf_progs;
+	fswan_bpf_opts_t *opts = o;
+	struct bpf_map *map;
+	struct ipv4_xfrm_policy *p;
+	char errmsg[FSWAN_XDP_STRERR_BUFSIZE];
+	int err;
+
+	if (__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags))
+		return 0;
+
+	/* Display current progs stats */
+	fswan_xfrm_policy_counters_vty(vty, opts, policy);
+
+	PMALLOC(p);
+
+	list_for_each_entry(opts, l, next) {
+		if (opts == o)
+			continue;
+
+		map = opts->bpf_maps[FSWAN_BPF_MAP_IPV4_LPM].map;
+		err = bpf_map__lookup_elem(map, key, sizeof(struct ipv4_lpm_key)
+					      , p, sizeof(*p), 0);
+		if (err) {
+			libbpf_strerror(err, errmsg, FSWAN_XDP_STRERR_BUFSIZE);
+			vty_out(vty, "%% [%s] error fetching value for pfx:%u.%u.%u.%u/%u (%s)%s"
+				   , opts->label, NIPQUAD(key->pfx), key->pfx_len, errmsg, VTY_NEWLINE);
+			continue;
+		}
+
+		fswan_xfrm_policy_counters_vty(vty, opts, p);
+	}
+
+	FREE(p);
+	return 0;
+}
+
 int
 fswan_xfrm_policy_vty(vty_t *vty)
 {
@@ -216,8 +265,8 @@ fswan_xfrm_policy_vty(vty_t *vty)
 					      , p, sizeof(*p), 0);
 		if (err) {
 			libbpf_strerror(err, errmsg, FSWAN_XDP_STRERR_BUFSIZE);
-			vty_out(vty, "%% error fetching value for pfx:%u.%u.%u.%u/%u (%s)%s"
-				   , NIPQUAD(key.pfx), key.pfx_len, errmsg, VTY_NEWLINE);
+			vty_out(vty, "%% [%s] error fetching value for pfx:%u.%u.%u.%u/%u (%s)%s"
+				   , opts->label, NIPQUAD(key.pfx), key.pfx_len, errmsg, VTY_NEWLINE);
 			continue;
 		}
 
@@ -226,10 +275,7 @@ fswan_xfrm_policy_vty(vty_t *vty)
 			   , NIPQUAD(key.pfx), key.pfx_len
 			   , (p->flags & XFRM_POLICY_FL_INGRESS) ? "in" : "out"
 			   , if_indextoname(p->ifindex, ifname), VTY_NEWLINE);
-
-		if (!__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags))
-			vty_out(vty, "   pkts:%lld bytes:%lld%s"
-				   , p->pkts, p->bytes, VTY_NEWLINE);
+		fswan_xfrm_policy_stats_vty(vty, opts, &key, p);
 	}
 
 	FREE(p);
