@@ -124,7 +124,7 @@ fswan_bpf_xfrm_policy_stats_add(fswan_bpf_opts_t *opts, struct ipv4_lpm_key *lpm
 
 	err = bpf_map__update_elem(map, lpm_key, sizeof(struct ipv4_lpm_key), s, sz, BPF_NOEXIST);
 
-	FREE(s);
+	free(s);
 	return err;
 }
 
