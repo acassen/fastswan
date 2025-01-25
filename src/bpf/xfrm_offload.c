@@ -53,6 +53,14 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__uint(max_entries, 1000000);
+	__type(key, sizeof(struct ipv4_lpm_key));
+	__type(value, struct xfrm_policy_stats);
+} xfrm_policy_stats_hash SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, __u32);
 	__uint(max_entries, 32);
 	__type(value, struct xfrm_offload_stats);
@@ -66,13 +74,18 @@ static __always_inline int
 xfrm_stats_update(struct xdp_md *ctx, int ifindex_egress, struct ipv4_xfrm_policy *p)
 {
 	struct xfrm_offload_stats *ingress_stats, *egress_stats;
+	struct ipv4_lpm_key lpm_key = { .pfx_len = p->pfx_len, .pfx = p->pfx };
+	struct xfrm_policy_stats *xp_stats;
 	__u32 ifindex_ingress = ctx->ingress_ifindex;
 
 	if (p->flags & XFRM_POLICY_FL_NO_STATS)
 		return 0;
 
-	p->pkts++;
-	p->bytes += (ctx->data_end - ctx->data);
+	xp_stats = bpf_map_lookup_elem(&xfrm_policy_stats_hash, &lpm_key);
+	if (xp_stats) {
+		xp_stats->pkts++;
+		xp_stats->bytes += (ctx->data_end - ctx->data);
+	}
 
 	ingress_stats = bpf_map_lookup_elem(&xfrm_offload_stats_hash, &ifindex_ingress);
 	if (!ingress_stats)

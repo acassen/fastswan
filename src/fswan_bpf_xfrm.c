@@ -53,6 +53,7 @@ fswan_bpf_xfrm_map_load(fswan_bpf_opts_t *opts)
 		return -1;
 
 	err = (err) ? : fswan_bpf_map_load(opts, "ipv4_xfrm_policy_lpm", FSWAN_BPF_MAP_IPV4_LPM);
+	err = (err) ? : fswan_bpf_map_load(opts, "xfrm_policy_stats_hash", FSWAN_BPF_MAP_POLICY_STATS_HASH);
 	err = (err) ? : fswan_bpf_map_load(opts, "xfrm_offload_stats_hash", FSWAN_BPF_MAP_STATS_HASH);
 
 	return err;
@@ -93,9 +94,53 @@ fswan_bpf_xfrm_load(fswan_bpf_opts_t *opts)
 /*
  *	XFRM Policy
  */
+static struct xfrm_policy_stats *
+fswan_bpf_xfrm_policy_stats_alloc(size_t *sz)
+{
+	unsigned int nr_cpus = libbpf_num_possible_cpus();
+	struct xfrm_policy_stats *new;
+
+	new = calloc(nr_cpus, sizeof(*new));
+	if (!new)
+		return NULL;
+
+	*sz = nr_cpus * sizeof(struct xfrm_policy_stats);
+	memset(new, 0, *sz);
+
+	return new;
+}
+
+static int
+fswan_bpf_xfrm_policy_stats_add(fswan_bpf_opts_t *opts, struct ipv4_lpm_key *lpm_key)
+{
+	struct bpf_map *map = opts->bpf_maps[FSWAN_BPF_MAP_POLICY_STATS_HASH].map;
+	struct xfrm_policy_stats *s;
+	size_t sz;
+	int err;
+
+	s = fswan_bpf_xfrm_policy_stats_alloc(&sz);
+	if (!s)
+		return -1;
+
+	err = bpf_map__update_elem(map, lpm_key, sizeof(struct ipv4_lpm_key), s, sz, BPF_NOEXIST);
+
+	FREE(s);
+	return err;
+}
+
+static int
+fswan_bpf_xfrm_policy_stats_del(fswan_bpf_opts_t *opts, struct ipv4_lpm_key *lpm_key)
+{
+	struct bpf_map *map = opts->bpf_maps[FSWAN_BPF_MAP_POLICY_STATS_HASH].map;
+
+	return bpf_map__delete_elem(map, lpm_key, sizeof(struct ipv4_lpm_key), 0);
+}
+
 static int
 fswan_bpf_xfrm_policy_set(xfrm_policy_t *p, struct ipv4_xfrm_policy *n)
 {
+	n->pfx_len = p->prefixlen_d;
+	n->pfx = p->daddr.a4;
 	n->src_pfx_mask = inet_cidrtomask(p->prefixlen_s);
 	n->src_pfx = p->saddr.a4;
 	n->ifindex = p->ifindex;
@@ -131,8 +176,10 @@ fswan_bpf_xfrm_lpm_action(int action, fswan_bpf_opts_t *opts, xfrm_policy_t *p)
 		err = bpf_map__update_elem(map, &lpm_key, sizeof(struct ipv4_lpm_key)
 					      , new, sizeof(struct ipv4_xfrm_policy)
 					      , BPF_NOEXIST);
+		err = (err) ? : fswan_bpf_xfrm_policy_stats_add(opts, &lpm_key);
 	} else if (action == XFRM_MSG_DELPOLICY) {
 		err = bpf_map__delete_elem(map, &lpm_key, sizeof(struct ipv4_lpm_key), 0);
+		err = (err) ? : fswan_bpf_xfrm_policy_stats_del(opts, &lpm_key);
 	} else
 		return -1;
 
@@ -194,17 +241,45 @@ fswan_bpf_xfrm_action(int action, xfrm_policy_t *p)
 }
 
 static int
-fswan_xfrm_policy_counters_vty(vty_t *vty, fswan_bpf_opts_t *opts, struct ipv4_xfrm_policy *p)
+fswan_bpf_xfrm_policy_counters_vty(vty_t *vty, fswan_bpf_opts_t *opts, struct ipv4_xfrm_policy *p)
 {
+	struct bpf_map *map = opts->bpf_maps[FSWAN_BPF_MAP_POLICY_STATS_HASH].map;
+	struct ipv4_lpm_key lpm_key = { .pfx_len = p->pfx_len, .pfx = p->pfx };
+	unsigned int nr_cpus = libbpf_num_possible_cpus();
+	struct xfrm_policy_stats *s;
+	uint64_t pkts = 0, bytes = 0;
+	int i, err;
+	size_t sz;
+
 	if (!opts || !p)
 		return 0;
 
-	vty_out(vty, "   %s:\tpkts:%lld bytes:%lld%s", opts->label, p->pkts, p->bytes, VTY_NEWLINE);
+	s = fswan_bpf_xfrm_policy_stats_alloc(&sz);
+	if (!s) {
+		vty_out(vty, "%% Cant allocate temp xfrm_policy_stats%s", VTY_NEWLINE);
+		return -1;
+	}
+
+	err = bpf_map__lookup_elem(map, &lpm_key, sizeof(struct ipv4_lpm_key), s, sz, 0);
+	if (err) {
+		vty_out(vty, "%% Cant get xfrm_policy_stats%s", VTY_NEWLINE);
+		goto end;
+	}
+
+	for (i = 0; i < nr_cpus; i++) {
+		pkts += s[i].pkts;
+		bytes += s[i].bytes;
+	}
+
+	vty_out(vty, "   %s:\tpkts:%ld bytes:%ld%s", opts->label, pkts, bytes, VTY_NEWLINE);
+
+  end:
+	free(s);
 	return 0;
 }
 
 static int
-fswan_xfrm_policy_stats_vty(vty_t *vty, fswan_bpf_opts_t *o, struct ipv4_lpm_key *key, struct ipv4_xfrm_policy *policy)
+fswan_bpf_xfrm_policy_stats_vty(vty_t *vty, fswan_bpf_opts_t *o, struct ipv4_lpm_key *key, struct ipv4_xfrm_policy *policy)
 {
 	list_head_t *l = &daemon_data->bpf_progs;
 	fswan_bpf_opts_t *opts = o;
@@ -216,14 +291,13 @@ fswan_xfrm_policy_stats_vty(vty_t *vty, fswan_bpf_opts_t *o, struct ipv4_lpm_key
 	if (__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags))
 		return 0;
 
-	/* Display current progs stats */
-	fswan_xfrm_policy_counters_vty(vty, opts, policy);
-
 	PMALLOC(p);
 
 	list_for_each_entry(opts, l, next) {
-		if (opts == o)
+		if (opts == o) {
+			fswan_bpf_xfrm_policy_counters_vty(vty, opts, policy);
 			continue;
+		}
 
 		map = opts->bpf_maps[FSWAN_BPF_MAP_IPV4_LPM].map;
 		err = bpf_map__lookup_elem(map, key, sizeof(struct ipv4_lpm_key)
@@ -235,17 +309,17 @@ fswan_xfrm_policy_stats_vty(vty_t *vty, fswan_bpf_opts_t *o, struct ipv4_lpm_key
 			continue;
 		}
 
-		fswan_xfrm_policy_counters_vty(vty, opts, p);
+		fswan_bpf_xfrm_policy_counters_vty(vty, opts, p);
 	}
 
 	FREE(p);
 	return 0;
 }
 
-int
-fswan_xfrm_policy_vty(vty_t *vty)
+static int
+fswan_bpf_xfrm_policy_vty(vty_t *vty, bool stats)
 {
-	struct ipv4_lpm_key key = {.pfx_len = 0, .pfx = 0}, next_key = {.pfx_len = 0, .pfx = 0};
+	struct ipv4_lpm_key key = { 0 }, next_key = { 0 };
 	fswan_bpf_opts_t *opts;
 	struct bpf_map *map;
 	struct ipv4_xfrm_policy *p;
@@ -275,13 +349,25 @@ fswan_xfrm_policy_vty(vty_t *vty)
 			   , NIPQUAD(key.pfx), key.pfx_len
 			   , (p->flags & XFRM_POLICY_FL_INGRESS) ? "in" : "out"
 			   , if_indextoname(p->ifindex, ifname), VTY_NEWLINE);
-		fswan_xfrm_policy_stats_vty(vty, opts, &key, p);
+		if (stats)
+			fswan_bpf_xfrm_policy_stats_vty(vty, opts, &key, p);
 	}
 
 	FREE(p);
 	return 0;
 }
 
+int
+fswan_xfrm_policy_vty(vty_t *vty)
+{
+	return fswan_bpf_xfrm_policy_vty(vty, false);
+}
+
+int
+fswan_xfrm_policy_stats_vty(vty_t *vty)
+{
+	return fswan_bpf_xfrm_policy_vty(vty, true);
+}
 
 /*
  *	XFRM Statistics

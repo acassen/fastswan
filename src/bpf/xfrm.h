@@ -51,18 +51,22 @@ struct ipv4_lpm_key {
 };
 
 struct ipv4_xfrm_policy {
+	__u32	pfx_len;
+	__u32	pfx;
 	__be32	src_pfx_mask;
 	__be32	src_pfx;
 	__u32	ifindex;
-
-	__u64	pkts;
-	__u64	bytes;
 
 	__u8	flags;
 } __attribute__ ((__aligned__(8)));
 #define XFRM_POLICY_FL_INGRESS	(1 << 0)
 #define XFRM_POLICY_FL_EGRESS	(1 << 1)
 #define XFRM_POLICY_FL_NO_STATS	(1 << 2)
+
+struct xfrm_policy_stats {
+	__u64	pkts;
+	__u64	bytes;
+} __attribute__ ((__aligned__(8)));
 
 struct xfrm_offload_stats {
 	__u32	ifindex;

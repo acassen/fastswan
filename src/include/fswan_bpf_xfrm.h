@@ -28,6 +28,7 @@
 /* MAP Entries*/
 enum {
 	FSWAN_BPF_MAP_IPV4_LPM = 0,
+	FSWAN_BPF_MAP_POLICY_STATS_HASH,
 	FSWAN_BPF_MAP_STATS_HASH,
 	FSWAN_BPF_MAP_CNT
 };
@@ -36,21 +37,25 @@ enum {
 #define XFRM_POLICY_FL_EGRESS	(1 << 1)
 #define XFRM_POLICY_FL_NO_STATS	(1 << 2)
 
-struct ipv4_xfrm_policy {
-	__be32	src_pfx_mask;
-	__be32	src_pfx;
-	__u32	ifindex;
-
-	__u64	pkts;
-	__u64	bytes;
-
-	__u8	flags;
-} __attribute__ ((__aligned__(8)));
-
 struct ipv4_lpm_key {
 	__u32	pfx_len;
 	__u32	pfx;
 };
+
+struct ipv4_xfrm_policy {
+	__u32	pfx_len;
+	__u32	pfx;
+	__be32	src_pfx_mask;
+	__be32	src_pfx;
+	__u32	ifindex;
+
+	__u8	flags;
+} __attribute__ ((__aligned__(8)));
+
+struct xfrm_policy_stats {
+	__u64	pkts;
+	__u64	bytes;
+} __attribute__ ((__aligned__(8)));
 
 struct xfrm_offload_stats {
 	__u32	ifindex;
@@ -63,6 +68,7 @@ struct xfrm_offload_stats {
 
 /* Prototypes */
 extern int fswan_xfrm_policy_vty(vty_t *);
+extern int fswan_xfrm_policy_stats_vty(vty_t *);
 extern int fswan_xfrm_stats_vty(vty_t *);
 extern int fswan_bpf_xfrm_stats_init(fswan_bpf_opts_t *);
 extern int fswan_bpf_xfrm_load(fswan_bpf_opts_t *);

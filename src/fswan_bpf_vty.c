@@ -221,6 +221,30 @@ DEFUN(show_xdp_xfrm_offload_policy,
 	return CMD_SUCCESS;
 }
 
+DEFUN(show_xdp_xfrm_offload_policy_stats,
+      show_xdp_xfrm_offload_policy_stats_cmd,
+      "show xdp xfrm offload policy statistcs",
+      SHOW_STR
+      "XDP XFRM offload policy statistics\n")
+{
+	int err;
+
+	if (!__test_bit(FSWAN_FL_XDP_XFRM_LOADED_BIT, &daemon_data->flags)) {
+		vty_out(vty, "%% XDP XFRM offload is not configured. Ignoring%s"
+			   , VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+
+	err = fswan_xfrm_policy_stats_vty(vty);
+	if (err) {
+		vty_out(vty, "%% Error displaying XDP XFRM policies%s"
+			   , VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+
+	return CMD_SUCCESS;
+}
+
 DEFUN(show_xdp_xfrm_offload_stats,
       show_xdp_xfrm_offload_stats_cmd,
       "show xdp xfrm offload statistics",
@@ -315,8 +339,10 @@ fswan_bpf_vty_init(void)
 
 	/* Install show commands */
 	install_element(VIEW_NODE, &show_xdp_xfrm_offload_policy_cmd);
+	install_element(VIEW_NODE, &show_xdp_xfrm_offload_policy_stats_cmd);
 	install_element(VIEW_NODE, &show_xdp_xfrm_offload_stats_cmd);
 	install_element(ENABLE_NODE, &show_xdp_xfrm_offload_policy_cmd);
+	install_element(ENABLE_NODE, &show_xdp_xfrm_offload_policy_stats_cmd);
 	install_element(ENABLE_NODE, &show_xdp_xfrm_offload_stats_cmd);
 
 	return 0;
