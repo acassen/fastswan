@@ -42,19 +42,28 @@ struct ipv4_lpm_key {
 	__u32	pfx;
 };
 
+struct ipv4_pfx {
+	__be32	mask;
+	__be32	addr;
+};
+
+#define XFRM_POLICY_MAX_SRC_PFX	5
 struct ipv4_xfrm_policy {
 	__u32	pfx_len;
 	__u32	pfx;
-	__be32	src_pfx_mask;
-	__be32	src_pfx;
+	struct ipv4_pfx src_pfx[XFRM_POLICY_MAX_SRC_PFX];
 	__u32	ifindex;
 
 	__u8	flags;
 } __attribute__ ((__aligned__(8)));
 
-struct xfrm_policy_stats {
+struct xfrm_counters {
 	__u64	pkts;
 	__u64	bytes;
+} __attribute__ ((__aligned__(8)));
+
+struct xfrm_policy_stats {
+	struct xfrm_counters src_pfx[XFRM_POLICY_MAX_SRC_PFX];
 } __attribute__ ((__aligned__(8)));
 
 struct xfrm_offload_stats {

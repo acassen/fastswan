@@ -402,27 +402,30 @@ inet_broadcast(uint32_t network, uint32_t netmask)
  * Convert CIDR netmask notation to long notation.
  */
 uint32_t
-inet_cidrtomask(uint8_t cidr)
+inet_bits2mask(uint8_t bits)
 {
-	uint32_t mask = 0;
-	int b;
+	uint32_t mask = 0xffffffff;
 
-	for (b = 0; b < cidr; b++)
-		mask |= (1 << (31 - b));
+	if (bits == 0)
+		return 0;
+
+	if (bits < 32)
+		mask <<= (32 - bits);
+
 	return ntohl(mask);
 }
 
 uint8_t
-inet_masktocidr(uint32_t mask)
+inet_mask2bits(uint32_t mask)
 {
-	uint8_t cidr = 0;
+	uint8_t bits = 0;
 
 	while (mask) {
-		cidr += (mask & 0x01);
+		bits += (mask & 0x01);
 		mask >>= 1;
 	}
 
-	return cidr;
+	return bits;
 }
 
 /* Getting localhost official canonical name */
