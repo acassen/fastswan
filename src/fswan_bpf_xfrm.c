@@ -208,7 +208,8 @@ fswan_bpf_xfrm_policy_src_pfx_add(xfrm_policy_t *p, struct ipv4_xfrm_policy *n, 
 }
 
 static int
-fswan_bpf_xfrm_policy_src_pfx_del(xfrm_policy_t *p, struct ipv4_xfrm_policy *pol, int *idx, int *inuse)
+fswan_bpf_xfrm_policy_src_pfx_del(struct bpf_map *map, struct ipv4_lpm_key *lpm_key,
+				  xfrm_policy_t *p, struct ipv4_xfrm_policy *pol, int *idx, int *inuse)
 {
 	struct ipv4_pfx *src_pfx;
 	uint32_t mask = inet_bits2mask(p->prefixlen_s);
@@ -230,7 +231,10 @@ fswan_bpf_xfrm_policy_src_pfx_del(xfrm_policy_t *p, struct ipv4_xfrm_policy *pol
 		alloc++;
 	}
 
-	*inuse = alloc;
+	err = (err) ? : bpf_map__update_elem(map, lpm_key, sizeof(struct ipv4_lpm_key)
+						, pol, sizeof(struct ipv4_xfrm_policy), 0);
+
+	*inuse = (*idx >= 0 && err) ? alloc + 1 : alloc;
 
 	return err;
 }
@@ -257,9 +261,9 @@ fswan_bpf_xfrm_policy_del(fswan_bpf_opts_t *opts, xfrm_policy_t *p, struct ipv4_
 {
 	struct bpf_map *map = opts->bpf_maps[FSWAN_BPF_MAP_IPV4_LPM].map;
 	struct ipv4_lpm_key lpm_key = { .pfx_len = p->prefixlen_d, .pfx = p->daddr.a4 };
-	int idx = -1, inuse = 0,  err = 0;
+	int idx = -1, inuse = -1,  err = 0;
 
-	err = fswan_bpf_xfrm_policy_src_pfx_del(p, pol, &idx, &inuse);
+	err = fswan_bpf_xfrm_policy_src_pfx_del(map, &lpm_key, p, pol, &idx, &inuse);
 	err = (err) ? : fswan_bpf_xfrm_policy_stats_idx_reset(opts, &lpm_key, idx);
 
 	/* Partial del */

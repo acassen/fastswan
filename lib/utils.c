@@ -412,7 +412,7 @@ inet_bits2mask(uint8_t bits)
 	if (bits < 32)
 		mask <<= (32 - bits);
 
-	return ntohl(mask);
+	return htonl(mask);
 }
 
 uint8_t
