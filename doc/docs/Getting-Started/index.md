@@ -25,26 +25,14 @@ These patches are included in the [kernel/git/leon/linux-rdma.git ipsec-fixes br
 
 - [x] [xfrm: Support ESN context update to hardware for TX]
 - [x] [net/mlx5e: Update TX ESN context for IPSec hardware offload]
-- [x] [xfrm: delay initialization of offload path till its actually requested]
 - [x] [xfrm: delete intermediate secpath entry in packet offload]
-- [x] [xfrm: simplify SA initialization routine]
-- [x] [xfrm: rely on XFRM offload]
-- [x] [xfrm: provide common xdo_dev_offload_ok callback]
-- [x] [bonding: delete always true device check]
-- [x] [xfrm: check for PMTU in tunnel mode for packet offload]
 - [x] [net/mlx5e: Separate address related variables to be in struct]
 - [x] [net/mlx5e: Properly match IPsec subnet addresses]
 - [x] [xfrm: fix tunnel mode TX datapath in packet offload mode]
 
   [xfrm: Support ESN context update to hardware for TX]: https://fastswan.org/kernel-patches/0000-xfrm-Support-ESN-context-update-to-hardware-for-TX.patch
   [net/mlx5e: Update TX ESN context for IPSec hardware offload]: https://fastswan.org/kernel-patches/0001-net-mlx5e-Update-TX-ESN-context-for-IPSec-hardware-o.patch
-  [xfrm: delay initialization of offload path till its actually requested]: https://fastswan.org/kernel-patches/0002-xfrm-delay-initialization-of-offload-path-till-its-a.patch
   [xfrm: delete intermediate secpath entry in packet offload]: https://fastswan.org/kernel-patches/0002-xfrm-delete-intermediate-secpath-entry-in-packet-off.patch
-  [xfrm: simplify SA initialization routine]: https://fastswan.org/kernel-patches/0003-xfrm-simplify-SA-initialization-routine.patch
-  [xfrm: rely on XFRM offload]: https://fastswan.org/kernel-patches/0004-xfrm-rely-on-XFRM-offload.patch
-  [xfrm: provide common xdo_dev_offload_ok callback]: https://fastswan.org/kernel-patches/0005-xfrm-provide-common-xdo_dev_offload_ok-callback-impl.patch
-  [bonding: delete always true device check]: https://fastswan.org/kernel-patches/0006-bonding-delete-always-true-device-check.patch
-  [xfrm: check for PMTU in tunnel mode for packet offload]: https://fastswan.org/kernel-patches/0007-xfrm-check-for-PMTU-in-tunnel-mode-for-packet-offloa.patch
   [net/mlx5e: Separate address related variables to be in struct]: https://fastswan.org/kernel-patches/0008-net-mlx5e-Separate-address-related-variables-to-be-i.patch
   [net/mlx5e: Properly match IPsec subnet addresses]: https://fastswan.org/kernel-patches/0009-net-mlx5e-Properly-match-IPsec-subnet-addresses.patch
   [xfrm: fix tunnel mode TX datapath in packet offload mode]: https://fastswan.org/kernel-patches/0010-xfrm-fix-tunnel-mode-TX-datapath-in-packet-offload-m.patch
