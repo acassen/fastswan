@@ -332,7 +332,7 @@ fswan_bpf_xfrm_lpm_del(fswan_bpf_opts_t *opts, xfrm_policy_t *p)
 	PMALLOC(pol);
 	if (!pol) {
 		log_message(LOG_INFO, "%s(): Cant allocate ipv4_xfrm_policy !!!"
-					, __FUNCTION__);
+				    , __FUNCTION__);
 		err = -1;
 		goto end;
 	}

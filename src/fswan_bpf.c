@@ -115,7 +115,7 @@ fswan_bpf_opts_exist(list_head_t *l, int argc, const char **argv)
 	int ifindex;
 
 	if (argc < 2)
-		return 0;
+		return NULL;
 
 	ifindex = if_nametoindex(argv[2]);
 	if (!ifindex)
