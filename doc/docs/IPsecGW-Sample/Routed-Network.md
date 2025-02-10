@@ -12,7 +12,7 @@ flexible and can be implemented on any routing equipment. Lets define 2 types of
 
 * **Connected Network** : *Net Segment 0* is the connected network between IPSEC-GW-0 and router R1. *Net Segment 2* is the connected network between IPSEC-GW-1 and router R2.
 
-* **Routed Network** : *Net Segment 3* is the routed network to IPSEC-GW-0. *Net Segment 4* is the routed network to IPSEC-GW-1. Most of the time routed networks are advertised using a routing protocol such as BGP. To simplify, we will use simple statics routes in our test scenario here.
+* **Routed Network** : *Net Segment 3* is the routed by R1 and advertised to IPSEC-GW-0. *Net Segment 4* is the routed by R2 and advertised to IPSEC-GW-1. Most of the time routed networks are advertised using a routing protocol such as BGP. To simplify, we will use simple statics routes in our test scenario here.
 
 When NE-0 wants to reach NE-1, its traffic is routed by router R1 to IPSEC-GW-0. IPSEC-GW-0 XFRM polices will match the traffic and tunnels it to IPSEC-GW-1, which, after tunnel decap, routes the traffic to router R2 to eventually reach NE-1. Symetric traffic routing applies when NE-1 wants to reach NE-0.
 
@@ -39,6 +39,9 @@ Since we just have 2 physicals network devices per host (or VM), **network namep
 
 === "Simulated-NE configuration"
 	```
+	sysctl -w net.ipv4.ip_forward=1
+	sysctl -w net.ipv6.conf.all.forwarding=1
+
 	# network namespace ns1
 	ip link set dev p0 up
 	ip address add 192.168.101.11/24 dev p0
@@ -202,7 +205,7 @@ ipsec-gw:$ ip neig
 
 IPSEC-GW **MUST** not try to resolv 48.0.0.1 since we are in Tunnel mode and 48.0.0.0/8 is a **Routed Network**.
 If we remove Packet Offload from the configuration or use Crypto Offload instead then 48.0.0.1 is not resolved and
-forwarding works as expected. So why does Packet Offload cause the Linux kernel's routing operations to end in a Layer2 resolution? The reason is simple 
+forwarding works as expected. So why does Packet Offload cause the Linux kernel's routing operations to end in a Layer2 resolution? The reason is :
 
 Packets that match the output xfrm policy are delivered to the netstack.
 In IPsec packet mode for tunnel mode, the HW is responsible for building the
