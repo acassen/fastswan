@@ -36,6 +36,7 @@ enum {
 #define XFRM_POLICY_FL_INGRESS	(1 << 0)
 #define XFRM_POLICY_FL_EGRESS	(1 << 1)
 #define XFRM_POLICY_FL_NO_STATS	(1 << 2)
+#define XFRM_POLICY_FL_IGN_SRC	(1 << 3)
 
 struct ipv4_lpm_key {
 	__u32	pfx_len;

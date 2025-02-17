@@ -66,13 +66,6 @@ struct {
 	__type(value, struct xfrm_offload_stats);
 } xfrm_offload_stats_hash SEC(".maps");
 
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, int);
-	__type(value, struct xfrm_offload_opts);
-} xfrm_offload_opts SEC(".maps");
-
 
 /*
  *	IP header related update
@@ -94,13 +87,15 @@ static __always_inline int
 xfrm_stats_update(struct xdp_md *ctx, int ifindex_egress, struct ipv4_xfrm_policy *p, int idx)
 {
 	struct xfrm_offload_stats *ingress_stats, *egress_stats;
-	struct ipv4_lpm_key lpm_key = { .pfx_len = p->pfx_len, .pfx = p->pfx };
+	struct ipv4_lpm_key lpm_key;
 	struct xfrm_policy_stats *xp_stats;
 	__u32 ifindex_ingress = ctx->ingress_ifindex;
 
-	if (p->flags & XFRM_POLICY_FL_NO_STATS)
+	if (!p || p->flags & XFRM_POLICY_FL_NO_STATS)
 		return 0;
 
+	lpm_key.pfx_len = p->pfx_len;
+	lpm_key.pfx = p->pfx;
 	xp_stats = bpf_map_lookup_elem(&xfrm_policy_stats_hash, &lpm_key);
 	if (xp_stats) {
 		xp_stats->src_pfx[idx].pkts++;
@@ -175,6 +170,9 @@ xfrm_policy_match(struct iphdr *iph, struct ipv4_xfrm_policy *p, int *idx)
 	struct ipv4_pfx *src_pfx;
 	int i;
 
+	if (p->flags & XFRM_POLICY_FL_IGN_SRC)
+		return 1;
+
 	for (i = 0; i < XFRM_POLICY_MAX_SRC_PFX; i++) {
 		src_pfx = &p->src_pfx[i];
 		if ((iph->saddr & src_pfx->mask) == src_pfx->addr) {
@@ -191,11 +189,11 @@ xdp_xfrm_offload(struct parse_pkt *pkt)
 {
 	void *data_end = (void *) (long) pkt->ctx->data_end;
 	void *data = (void *) (long) pkt->ctx->data;
-	struct ipv4_xfrm_policy *p;
+	struct ipv4_xfrm_policy *p = NULL;
 	struct ipv4_lpm_key k;
 	struct ethhdr *ethh;
 	struct iphdr *iph;
-	int idx = -1;
+	int idx = 0;
 
 	ethh = data;
 	iph = data + pkt->l3_offset;

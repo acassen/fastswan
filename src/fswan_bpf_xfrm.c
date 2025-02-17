@@ -176,6 +176,9 @@ fswan_bpf_xfrm_policy_src_pfx_add(xfrm_policy_t *p, struct ipv4_xfrm_policy *n, 
 	uint32_t mask = inet_bits2mask(p->prefixlen_s);
 	int i, idx_available = -1;
 
+	if (__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_SRC_MATCH_BIT, &daemon_data->flags))
+		return 0;
+
 	/* EEXIST ? */
 	for (i = 0; i < XFRM_POLICY_MAX_SRC_PFX; i++) {
 		src_pfx = &n->src_pfx[i];
@@ -215,6 +218,9 @@ fswan_bpf_xfrm_policy_src_pfx_del(struct bpf_map *map, struct ipv4_lpm_key *lpm_
 	uint32_t mask = inet_bits2mask(p->prefixlen_s);
 	int i, alloc = 0, err = -1;
 
+	if (__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_SRC_MATCH_BIT, &daemon_data->flags))
+		return 0;
+
 	for (i = 0; i < XFRM_POLICY_MAX_SRC_PFX; i++) {
 		src_pfx = &pol->src_pfx[i];
 
@@ -253,6 +259,8 @@ fswan_bpf_xfrm_policy_set(xfrm_policy_t *p, struct ipv4_xfrm_policy *n)
 		n->flags |= XFRM_POLICY_FL_EGRESS;
 	if (__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags))
 		n->flags |= XFRM_POLICY_FL_NO_STATS;
+	if (__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_SRC_MATCH_BIT, &daemon_data->flags))
+		n->flags |= XFRM_POLICY_FL_IGN_SRC;
 	return 0;
 }
 
@@ -501,6 +509,16 @@ fswan_bpf_xfrm_policy_pfx_vty(vty_t *vty, fswan_bpf_opts_t *opts, struct ipv4_lp
 	struct ipv4_pfx *pfx;
 	char ifname[IF_NAMESIZE];
 	int i;
+
+	if (p->flags & XFRM_POLICY_FL_IGN_SRC) {
+		vty_out(vty, " dst %u.%u.%u.%u/%u dir %s dev %s%s"
+			   , NIPQUAD(key->pfx), key->pfx_len
+			   , (p->flags & XFRM_POLICY_FL_INGRESS) ? "in" : "out"
+			   , if_indextoname(p->ifindex, ifname), VTY_NEWLINE);
+		if (stats)
+			fswan_bpf_xfrm_policy_stats_vty(vty, opts, key, p, 0);
+		return 0;
+	}
 
 	for (i = 0; i < XFRM_POLICY_MAX_SRC_PFX; i++) {
 		pfx = &p->src_pfx[i];

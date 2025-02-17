@@ -67,6 +67,7 @@ struct ipv4_xfrm_policy {
 #define XFRM_POLICY_FL_INGRESS	(1 << 0)
 #define XFRM_POLICY_FL_EGRESS	(1 << 1)
 #define XFRM_POLICY_FL_NO_STATS	(1 << 2)
+#define XFRM_POLICY_FL_IGN_SRC	(1 << 3)
 
 struct xfrm_counters {
 	__u64	pkts;
