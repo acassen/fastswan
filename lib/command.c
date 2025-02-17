@@ -405,32 +405,11 @@ install_element(node_type_t ntype, cmd_element_t *cmd)
 	cmd->cmdsize = cmd_cmdsize(cmd->strvec);
 }
 
-static const unsigned char itoa64[] =
-"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-
-static void
-to64(char *s, long v, int n)
+static const char *
+zencrypt(const char *passwd)
 {
-	while (--n >= 0) {
-		*s++ = itoa64[v&0x3f];
-		v >>= 6;
-	}
-}
-
-static char *
-zencrypt (const char *passwd)
-{
-	char salt[6];
-	timeval_t tv;
-	char *crypt(const char *, const char *);
-
-	gettimeofday(&tv,0);
-  
-	to64(&salt[0], random(), 3);
-	to64(&salt[3], tv.tv_usec, 3);
-	salt[5] = '\0';
-
-	return crypt(passwd, salt);
+	/* FIXME: eather remove or use recent stuff */
+	return passwd;
 }
 
 /* This function write configuration of this host. */

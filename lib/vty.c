@@ -269,7 +269,6 @@ vty_auth(vty_t *vty, char *buf)
 	char *passwd = NULL;
 	node_type_t next_node = 0;
 	int fail;
-	char *crypt(const char *, const char *);
 
 	switch (vty->node) {
 	case AUTH_NODE:
@@ -293,7 +292,8 @@ vty_auth(vty_t *vty, char *buf)
 
 	if (passwd) {
 		if (host.encrypt)
-			fail = strcmp(crypt(buf, passwd), passwd);
+			/* FIXME: eather remove or use recent stuff */
+			fail = strcmp(buf, passwd);
 		else
 			fail = strcmp(buf, passwd);
 	} else {

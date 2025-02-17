@@ -33,7 +33,7 @@ sbindir     = ${exec_prefix}/sbin
 sysconfdir  = ${prefix}/etc
 
 CC        ?= gcc
-LDFLAGS   = -lpthread -lcrypt -ggdb -lm -lz -lelf
+LDFLAGS   = -lpthread -ggdb -lz -lelf
 SUBDIRS   = lib src src/bpf
 LIBBPF    = libbpf
 OBJDIR    = $(LIBBPF)/src

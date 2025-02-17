@@ -66,6 +66,26 @@ struct {
 	__type(value, struct xfrm_offload_stats);
 } xfrm_offload_stats_hash SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, int);
+	__type(value, struct xfrm_offload_opts);
+} xfrm_offload_opts SEC(".maps");
+
+
+/*
+ *	IP header related update
+ */
+static __always_inline int
+ip_decrease_ttl(struct iphdr *iph)
+{
+	__u32 check = (__u32) iph->check;
+
+	check += (__u32) bpf_htons(0x0100);
+	iph->check = (__sum16) (check + (check >= 0xFFFF));
+	return --iph->ttl;
+}
 
 /*
  *	Stats related
@@ -106,19 +126,6 @@ xfrm_stats_update(struct xdp_md *ctx, int ifindex_egress, struct ipv4_xfrm_polic
 	egress_stats->tx_pkts++;
 	egress_stats->tx_bytes += (ctx->data_end - ctx->data);
 	return 0;
-}
-
-/*
- *	IP header related update
- */
-static __always_inline int
-ip_decrease_ttl(struct iphdr *iph)
-{
-	__u32 check = (__u32) iph->check;
-
-	check += (__u32) bpf_htons(0x0100);
-	iph->check = (__sum16) (check + (check >= 0xFFFF));
-	return --iph->ttl;
 }
 
 /*
