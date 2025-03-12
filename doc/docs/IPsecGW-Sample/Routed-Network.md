@@ -208,9 +208,9 @@ routing :
 vlan 502-513
 
 vlan 502
-  name ipsecgw_unciphered_0
+  name ipsecgw_trusted_0
 vlan 503
-  name ipsecgw_unciphered_1
+  name ipsecgw_trusted_1
 
 vrf context ipsecgw_unciphered
   ip route 16.0.0.0/8 123.0.0.1
@@ -218,13 +218,13 @@ vrf context ipsecgw_unciphered
 
 interface Vlan510
   no shutdown
-  vrf member ipsecgw_ciphered_0
+  vrf member ipsecgw_unciphered
   no ip redirects
   ip address 123.0.0.254/16
 
 interface Vlan512
   no shutdown
-  vrf member ipsecgw_ciphered_1
+  vrf member ipsecgw_unciphered
   no ip redirects
   ip address 123.2.0.254/16
 
