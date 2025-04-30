@@ -244,3 +244,287 @@ interface Ethernet1/28
   switchport trunk allowed vlan 503,512
   no shutdown
 ```
+
+## Simulated Environment
+
+This section will define a simulated env to emulate topology as found on production
+networks. Our LAB Topology can be used as part of a non-regression & validation process
+and run on a single server hosting multiple NICs (ConnectX-7 here in our example) where
+each NIC is a VFIO in a dedicated VM.
+
+Our topology will be articulated around 2 main nodes :
+
+* **IPSEC-GW**: Configurations and features used in production we want to validate.
+* **Simulated-Env**: Set of configurations emulating routings and network env.
+
+Each time we want to change, extend or add a new feature then *IPSEC-GW* will be used.
+*Simulated-Env* configuration is considered to be fixed and will never be altered.
+
+### LAB Topology
+<p style="text-align: center"><img src="../../assets/RoutedNetwork-LAB.png"></p>
+
+### LAB Topology : Network Configuration
+To simulate a full routing env within Simulated-NE, we are isolating network segments and
+functions using Network Namespace. Each physical CX interface will be part of a bridge
+and VETH interfaces are used as 'cables' for interconnection. Following Network Namespace
+are created :
+
+* **ns0**: hosting 16.0.0.0/8 network
+* **wild-ns**: emulating 'Wild Telco Network' by routing endpoints prefixes
+* **swan-ns**: emulating Network running strongSwan IPsec function
+* **ns1**: hosting 48.0.0./8 network
+
+IPSEC-GW node will run a simple routing configuration where un-ciphered traffic are on
+P0 and ciphered traffic on P1. both endpoint prefixes will be routed to each bridge.
+
+To test a simple icmp-request will be originated from *ns0* and destinated to *ns1* as
+follow:
+
+```
+simulated-ne:$ ip netns exec ns0 ping -I 16.0.0.1 48.0.0.1
+PING 48.0.0.1 (48.0.0.1) from 16.0.0.1 : 56(84) bytes of data.
+64 bytes from 48.0.0.1: icmp_seq=1 ttl=61 time=0.224 ms
+64 bytes from 48.0.0.1: icmp_seq=2 ttl=61 time=0.254 ms
+64 bytes from 48.0.0.1: icmp_seq=3 ttl=61 time=0.241 ms
+64 bytes from 48.0.0.1: icmp_seq=4 ttl=61 time=0.247 ms
+^C
+--- 48.0.0.1 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3101ms
+rtt min/avg/max/mdev = 0.224/0.241/0.254/0.011 ms
+```
+=== "Simulated-NE configuration"
+	```
+	# Enable forwarding
+	sysctl -w net.ipv4.ip_forward=1
+	sysctl -w net.ipv6.conf.all.forwarding=1
+
+	# Create Virtual-Ethernet cables
+	ip link add dev veth0 type veth peer name ns0-eth0
+	ip link add dev veth1 type veth peer name wild-eth0
+	ip link add dev wild-eth1 type veth peer name swan-eth0
+	ip link add dev swan-eth1 type veth peer name ns1-eth0
+
+	# Create bridge
+	ip link add br-network0 type bridge
+	ip link set p0 master br-network0
+	ip link set veth0 up
+	ip link set veth0 master br-network0
+
+	ip link add br-network1 type bridge
+	ip link set p1 master br-network1
+	ip link set veth1 up
+	ip link set veth1 master br-network1
+
+	# Namespace: ns0
+	ip netns add ns0
+	ip link set ns0-eth0 netns ns0
+	ip -n ns0 link set ns0-eth0 up
+	ip -n ns0 link set dev lo up
+	ip -n ns0 address add 10.0.0.1/24 dev ns0-eth0
+	ip -n ns0 address add 16.0.0.1/8 dev ns0-eth0
+	ip -n ns0 route add 48.0.0.0/8 via 10.0.0.254
+	ip link set dev br-network0 up
+	ip link set dev p0 up
+
+	# Namespace: wild-ns
+	ip netns add wild-ns
+	ip link set wild-eth0 netns wild-ns
+	ip link set wild-eth1 netns wild-ns
+	ip -n wild-ns link set wild-eth0 up
+	ip -n wild-ns link set wild-eth1 up
+	ip -n wild-ns link set dev lo up
+	ip -n wild-ns address add 123.0.0.254/24 dev wild-eth0
+	ip -n wild-ns address add 123.2.0.254/24 dev wild-eth1
+	ip -n wild-ns route add 16.0.0.0/8 via 123.0.0.1
+	ip -n wild-ns route add 48.0.0.0/8 via 123.2.0.1
+	ip link set dev br-network1 up
+	ip link set dev p1 up
+
+	# Namespace: swan-ns
+	ip netns add swan-ns
+	ip link set swan-eth0 netns swan-ns
+	ip link set swan-eth1 netns swan-ns
+	ip -n swan-ns link set swan-eth0 up
+	ip -n swan-ns link set swan-eth1 up
+	ip -n swan-ns link set dev lo up
+	ip -n swan-ns address add 123.2.0.1/24 dev swan-eth0
+	ip -n swan-ns address add 11.0.0.254/24 dev swan-eth1
+	ip -n swan-ns route add 123.0.0.0/24 via 123.2.0.254
+	ip -n swan-ns route add 16.0.0.0/8 via 123.2.0.254
+	ip -n swan-ns route add 48.0.0.0/8 via 11.0.0.1
+
+	# Namespace: ns1
+	ip netns add ns1
+	ip link set ns1-eth0 netns ns1
+	ip -n ns1 link set ns1-eth0 up
+	ip -n ns1 link set dev lo up
+	ip -n ns1 address add 11.0.0.1/24 dev ns1-eth0
+	ip -n ns1 address add 48.0.0.1/8 dev ns1-eth0
+	ip -n ns1 route add 16.0.0.0/8 via 11.0.0.254
+	```
+
+=== "IPSEC-GW configuration"
+	```
+	# Enable forwarding
+	sysctl -w net.ipv4.ip_forward=1
+	sysctl -w net.ipv6.conf.all.forwarding=1
+
+	# Local network
+	ip link set dev p0 up
+	ip address add 10.0.0.254/24 dev p0
+
+	ip link set dev p1 up
+	ip address add 123.0.0.1/24 dev p1
+
+	# Connected network
+	ip route add 123.2.0.0/16 via 123.0.0.254
+
+	# Routed networks
+	ip route add 16.0.0.0/8 via 10.0.0.1
+	ip route add 48.0.0.0/8 via 123.0.0.254
+	```
+
+### LAB Topology : strongSwan Configuration
+The IPSEC-GW node is the only node configured in hw_offload mode. Simulated-NE is
+configured without offload enabled to inspect ingress and egress ESP traffic. For
+all strongSwan operations, please refer to the strongSwan documentation, but to
+start SA, simply run from *IPSEC-GW* node :
+
+```
+ipsec-gw:$ swanctl --load-all
+ipsec-gw:$ swanctl -i --child gw
+```
+
+On *Simulated-NE* run strongSwan in *swan-ns* network namespace. For more information
+about strongSwan & network namespace support please refer to [strongSwan in Linux Network
+Namespaces]. We used the following :
+```
+simulated-ne:$ mkdir -p /etc/netns/swan-ns/swanctl/conf.d/
+simulated-ne:$ cp cx-swanctl.conf /etc/netns/swan-ns/swanctl/conf.d/
+simulated-ne:$ ip netns exec swan-ns ipsec start
+simulated-ne:$ ip netns exec swan-ns swanctl --load-all
+```
+
+  [strongSwan in Linux Network Namespaces]: https://docs.strongswan.org/docs/latest/howtos/nameSpaces.html
+
+
+=== "IPSEC-GW cx-swanctl.conf"
+	```
+	connections {
+	  B-TO-B {
+	        local_addrs  = 123.0.0.1
+	        remote_addrs = 123.2.0.1
+
+	        local {
+	                auth = psk
+	                id = ipsec-gw
+	        }
+	        remote {
+	                auth = psk
+	                id = ipsec-enodeb
+	        }
+
+	        children {
+	          gw {
+	                local_ts = 16.0.0.0/8
+	                remote_ts = 48.0.0.0/8
+	                esp_proposals = aes128gcm128-x25519-esn
+	                mode = tunnel
+	                policies_fwd_out = yes
+	                hw_offload = packet
+	          }
+	        }
+	        version = 2
+	        mobike = no
+	        reauth_time = 0
+	        proposals = aes128-sha256-x25519
+	  }
+	}
+
+	secrets {
+	  ike-GW {
+	        id-1 = ipsec-gw
+	        id-2 = ipsec-enodeb
+	        secret = 'TopSecret'
+	  }
+	}
+	```
+
+=== "Simulated-NE cx-swanctl.conf"
+	```
+	connections {
+	  B-TO-B {
+		local_addrs  = 123.2.0.1
+		remote_addrs = 123.0.0.1
+
+		local {
+			auth = psk
+			id = ipsec-enodeb
+		}
+		remote {
+			auth = psk
+			id = ipsec-gw
+		}
+
+		children {
+		  gw {
+			local_ts = 48.0.0.0/8
+			remote_ts = 16.0.0.0/8
+			esp_proposals = aes128gcm128-x25519-esn
+			mode = tunnel
+			policies_fwd_out = yes
+		  }
+		}
+		version = 2
+		mobike = no
+		reauth_time = 0
+		proposals = aes128-sha256-x25519
+	  }
+	}
+
+	secrets {
+	  ike-GW {
+		id-1 = ipsec-enodeb
+		id-2 = ipsec-gw
+		secret = 'TopSecret'
+	  }
+	}
+	```
+
+### Testing
+To validate IPSEC tunnel Packet Offload operations, we send icmp-request from
+Simulated-NE *ns0* IP Address to Simulated *ns1* IP Address. This simulates a
+global routing path via remote IPSEC-GW. The following results MUST be observed:
+
+
+``` title="ICMP-Request from Simulated-NE"
+simulated-ne:$ ip netns exec ns0 ping -I 16.0.0.1 48.0.0.1
+PING 48.0.0.1 (48.0.0.1) from 16.0.0.1 : 56(84) bytes of data.
+64 bytes from 48.0.0.1: icmp_seq=1 ttl=61 time=0.224 ms
+64 bytes from 48.0.0.1: icmp_seq=2 ttl=61 time=0.254 ms
+64 bytes from 48.0.0.1: icmp_seq=3 ttl=61 time=0.241 ms
+64 bytes from 48.0.0.1: icmp_seq=4 ttl=61 time=0.247 ms
+^C
+--- 48.0.0.1 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3101ms
+rtt min/avg/max/mdev = 0.224/0.241/0.254/0.011 ms
+```
+
+``` title="ethtool IPsec counters from IPSEC-GW"
+ipsec-gw:$ ethtool -S p1 | grep ipsec
+     ipsec_rx_pkts: 38
+     ipsec_rx_bytes: 6004
+     ipsec_rx_drop_pkts: 0
+     ipsec_rx_drop_bytes: 0
+     ipsec_rx_drop_mismatch_sa_sel: 0
+     ipsec_tx_pkts: 46
+     ipsec_tx_bytes: 7084
+     ipsec_tx_drop_pkts: 0
+     ipsec_tx_drop_bytes: 0
+     ipsec_rx_drop_sp_alloc: 0
+     ipsec_rx_drop_sadb_miss: 0
+     ipsec_tx_drop_bundle: 0
+     ipsec_tx_drop_no_state: 0
+     ipsec_tx_drop_not_ip: 0
+     ipsec_tx_drop_trailer: 0
+```

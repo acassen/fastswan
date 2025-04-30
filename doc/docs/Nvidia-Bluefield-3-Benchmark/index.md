@@ -129,7 +129,7 @@ following iMIX table. These iMIX tables will be used in all our test scenarios :
 TRex traffic amplifiers (multipliers) use a linear scale traffic factor to
 incrementally increase traffic. We have extended this concept to support steps
 in traffic amplification. Steps provide fine-grained threshold detection. In all
-of our tests, we will use 20 steps, where each step amplifies traffic every second,
+of our tests, we will use 20 steps, where each step amplifies traffic every 10 seconds,
 so each time we run a test, we have to wait 200s for it to complete.
 
 Trex provides a client interface via its STL API. We have created a tool, called 'TRex 
@@ -621,7 +621,6 @@ Nothing more to say except that the impacts are negligible.
 ---
 
 ## **Test 4 - fastSwan Routed**
----
 
 The purpose of this test is to evaluate global performances of the solution over
 a network architecture as found on large scale Telco networks. We will use both
