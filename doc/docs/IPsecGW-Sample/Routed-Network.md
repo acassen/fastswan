@@ -255,13 +255,19 @@ each NIC is a VFIO in a dedicated VM.
 Our topology will be articulated around 2 main nodes :
 
 * **IPSEC-GW**: Configurations and features used in production we want to validate.
-* **Simulated-Env**: Set of configurations emulating routings and network env.
+* **Simulated-NE**: Set of configurations emulating routings and network env.
 
 Each time we want to change, extend or add a new feature then *IPSEC-GW* will be used.
-*Simulated-Env* configuration is considered to be fixed and will never be altered.
+*Simulated-NE* configuration is considered to be fixed and will never be altered.
 
 ### LAB Topology
+The LAB topology uses dual-stack IPv4 & IPv6 configurations. For readability reasons, we
+present the split display in the following 2 pictures:
+
+**IPv4 network configuration**
 <p style="text-align: center"><img src="../../assets/RoutedNetwork-LAB.png"></p>
+**IPv6 network configuration**
+<p style="text-align: center"><img src="../../assets/RoutedNetwork-LAB6.png"></p>
 
 ### LAB Topology : Network Configuration
 To simulate a full routing env within Simulated-NE, we are isolating network segments and
@@ -277,24 +283,10 @@ are created :
 IPSEC-GW node will run a simple routing configuration where un-ciphered traffic are on
 P0 and ciphered traffic on P1. both endpoint prefixes will be routed to each bridge.
 
-To test a simple icmp-request will be originated from *ns0* and destinated to *ns1* as
-follow:
-
-```
-simulated-ne:$ ip netns exec ns0 ping -I 16.0.0.1 48.0.0.1
-PING 48.0.0.1 (48.0.0.1) from 16.0.0.1 : 56(84) bytes of data.
-64 bytes from 48.0.0.1: icmp_seq=1 ttl=61 time=0.224 ms
-64 bytes from 48.0.0.1: icmp_seq=2 ttl=61 time=0.254 ms
-64 bytes from 48.0.0.1: icmp_seq=3 ttl=61 time=0.241 ms
-64 bytes from 48.0.0.1: icmp_seq=4 ttl=61 time=0.247 ms
-^C
---- 48.0.0.1 ping statistics ---
-4 packets transmitted, 4 received, 0% packet loss, time 3101ms
-rtt min/avg/max/mdev = 0.224/0.241/0.254/0.011 ms
-```
 === "Simulated-NE configuration"
 	```
 	# Enable forwarding
+	sysctl -w net.core.devconf_inherit_init_net=1
 	sysctl -w net.ipv4.ip_forward=1
 	sysctl -w net.ipv6.conf.all.forwarding=1
 
@@ -323,6 +315,9 @@ rtt min/avg/max/mdev = 0.224/0.241/0.254/0.011 ms
 	ip -n ns0 address add 10.0.0.1/24 dev ns0-eth0
 	ip -n ns0 address add 16.0.0.1/8 dev ns0-eth0
 	ip -n ns0 route add 48.0.0.0/8 via 10.0.0.254
+	ip -n ns0 -6 address add 10::1/64 dev ns0-eth0
+	ip -n ns0 -6 address add 16::1/64 dev ns0-eth0
+	ip -n ns0 -6 route add 48::/64 via 10::254
 	ip link set dev br-network0 up
 	ip link set dev p0 up
 
@@ -337,6 +332,10 @@ rtt min/avg/max/mdev = 0.224/0.241/0.254/0.011 ms
 	ip -n wild-ns address add 123.2.0.254/24 dev wild-eth1
 	ip -n wild-ns route add 16.0.0.0/8 via 123.0.0.1
 	ip -n wild-ns route add 48.0.0.0/8 via 123.2.0.1
+	ip -n wild-ns -6 address add 123::254/64 dev wild-eth0
+	ip -n wild-ns -6 address add 123:2::254/64 dev wild-eth1
+	ip -n wild-ns -6 route add 16::/64 via 123::1
+	ip -n wild-ns -6 route add 48::/64 via 123:2::1
 	ip link set dev br-network1 up
 	ip link set dev p1 up
 
@@ -352,6 +351,11 @@ rtt min/avg/max/mdev = 0.224/0.241/0.254/0.011 ms
 	ip -n swan-ns route add 123.0.0.0/24 via 123.2.0.254
 	ip -n swan-ns route add 16.0.0.0/8 via 123.2.0.254
 	ip -n swan-ns route add 48.0.0.0/8 via 11.0.0.1
+	ip -n swan-ns -6 address add 123:2::1/64 dev swan-eth0
+	ip -n swan-ns -6 address add 11::254/64 dev swan-eth1
+	ip -n swan-ns -6 route add 123::/64 via 123:2::254
+	ip -n swan-ns -6 route add 16::/64 via 123:2::254
+	ip -n swan-ns -6 route add 48::/64 via 11::1
 
 	# Namespace: ns1
 	ip netns add ns1
@@ -361,27 +365,36 @@ rtt min/avg/max/mdev = 0.224/0.241/0.254/0.011 ms
 	ip -n ns1 address add 11.0.0.1/24 dev ns1-eth0
 	ip -n ns1 address add 48.0.0.1/8 dev ns1-eth0
 	ip -n ns1 route add 16.0.0.0/8 via 11.0.0.254
+	ip -n ns1 -6 address add 11::1/64 dev ns1-eth0
+	ip -n ns1 -6 address add 48::1/64 dev ns1-eth0
+	ip -n ns1 -6 route add 16::/64 via 11::254
 	```
 
 === "IPSEC-GW configuration"
 	```
 	# Enable forwarding
+	sysctl -w net.core.devconf_inherit_init_net=1
 	sysctl -w net.ipv4.ip_forward=1
 	sysctl -w net.ipv6.conf.all.forwarding=1
 
 	# Local network
 	ip link set dev p0 up
 	ip address add 10.0.0.254/24 dev p0
+	ip -6 address add 10::254/64 dev p0
 
 	ip link set dev p1 up
 	ip address add 123.0.0.1/24 dev p1
+	ip -6 address add 123::1/64 dev p1
 
 	# Connected network
 	ip route add 123.2.0.0/16 via 123.0.0.254
+	ip -6 route add 123:2::/64 via 123::254
 
 	# Routed networks
 	ip route add 16.0.0.0/8 via 10.0.0.1
 	ip route add 48.0.0.0/8 via 123.0.0.254
+	ip -6 route add 16::/64 via 10::1
+	ip -6 route add 48::/64 via 123::254
 	```
 
 ### LAB Topology : strongSwan Configuration
@@ -412,6 +425,8 @@ simulated-ne:$ ip netns exec swan-ns swanctl --load-all
 	```
 	connections {
 	  B-TO-B {
+	        #local_addrs  = 123::1
+	        #remote_addrs = 123:2::1
 	        local_addrs  = 123.0.0.1
 	        remote_addrs = 123.2.0.1
 
@@ -426,6 +441,8 @@ simulated-ne:$ ip netns exec swan-ns swanctl --load-all
 
 	        children {
 	          gw {
+	                #local_ts = 16::/64
+	                #remote_ts = 48::/64
 	                local_ts = 16.0.0.0/8
 	                remote_ts = 48.0.0.0/8
 	                esp_proposals = aes128gcm128-x25519-esn
@@ -454,6 +471,8 @@ simulated-ne:$ ip netns exec swan-ns swanctl --load-all
 	```
 	connections {
 	  B-TO-B {
+		#local_addrs  = 123:2::1
+		#remote_addrs = 123::1
 		local_addrs  = 123.2.0.1
 		remote_addrs = 123.0.0.1
 
@@ -468,6 +487,8 @@ simulated-ne:$ ip netns exec swan-ns swanctl --load-all
 
 		children {
 		  gw {
+			#local_ts = 48::/64
+			#remote_ts = 16::/64
 			local_ts = 48.0.0.0/8
 			remote_ts = 16.0.0.0/8
 			esp_proposals = aes128gcm128-x25519-esn
@@ -497,7 +518,7 @@ Simulated-NE *ns0* IP Address to Simulated *ns1* IP Address. This simulates a
 global routing path via remote IPSEC-GW. The following results MUST be observed:
 
 
-``` title="ICMP-Request from Simulated-NE"
+``` title="IPv4 ICMP-Request from Simulated-NE"
 simulated-ne:$ ip netns exec ns0 ping -I 16.0.0.1 48.0.0.1
 PING 48.0.0.1 (48.0.0.1) from 16.0.0.1 : 56(84) bytes of data.
 64 bytes from 48.0.0.1: icmp_seq=1 ttl=61 time=0.224 ms
@@ -510,15 +531,28 @@ PING 48.0.0.1 (48.0.0.1) from 16.0.0.1 : 56(84) bytes of data.
 rtt min/avg/max/mdev = 0.224/0.241/0.254/0.011 ms
 ```
 
+``` title="IPv6 ICMP-Request from Simulated-NE"
+simulated-ne:$ ip netns exec ns0 ping6 -I 16::1 48::1
+PING 48::1(48::1) from 16::1 : 56 data bytes
+64 bytes from 48::1: icmp_seq=1 ttl=62 time=0.850 ms
+64 bytes from 48::1: icmp_seq=2 ttl=62 time=0.815 ms
+64 bytes from 48::1: icmp_seq=3 ttl=62 time=0.821 ms
+64 bytes from 48::1: icmp_seq=4 ttl=62 time=0.845 ms
+^C
+--- 48::1 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3004ms
+rtt min/avg/max/mdev = 0.815/0.832/0.850/0.015 ms
+```
+
 ``` title="ethtool IPsec counters from IPSEC-GW"
 ipsec-gw:$ ethtool -S p1 | grep ipsec
-     ipsec_rx_pkts: 38
-     ipsec_rx_bytes: 6004
+     ipsec_rx_pkts: 37
+     ipsec_rx_bytes: 4534
      ipsec_rx_drop_pkts: 0
      ipsec_rx_drop_bytes: 0
      ipsec_rx_drop_mismatch_sa_sel: 0
-     ipsec_tx_pkts: 46
-     ipsec_tx_bytes: 7084
+     ipsec_tx_pkts: 37
+     ipsec_tx_bytes: 7118
      ipsec_tx_drop_pkts: 0
      ipsec_tx_drop_bytes: 0
      ipsec_rx_drop_sp_alloc: 0
