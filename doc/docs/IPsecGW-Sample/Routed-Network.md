@@ -83,7 +83,6 @@ IPSEC-GW-1.
 
 	ip link set p0 up
 	ip address add 123.2.0.1/16 dev p0
-	ip address add 123.2.1.2/16 dev p0
 
 	ip link add link p0 name p0.503 type vlan id 503
 	ip link set dev p0.503 up
@@ -105,7 +104,7 @@ IPSEC-GW-1.
 ## IPsecGW: strongSwan configuration
 
 IPSEC-GW-0 will use 123.0.0.1 IP Address for its IPsec tunnel endpoint
-and IPSEC-GW-1 will use 123.2.1.2 IP Address for its IPsec tunnel endpoint.
+and IPSEC-GW-1 will use 123.2.0.1 IP Address for its IPsec tunnel endpoint.
 
 For all strongSwan operations, please refer to the strongSwan documentation, but to start SA, simply run :
 ```
@@ -118,7 +117,7 @@ IPSEC-GW-0$ sudo swanctl -i --child tnl-0-1
 	connections {
 	  tunnel-0-1 {
 		local_addrs  = 123.0.0.1
-		remote_addrs = 123.2.1.2
+		remote_addrs = 123.2.0.1
  
 		local {
 			auth = psk
@@ -160,7 +159,7 @@ IPSEC-GW-0$ sudo swanctl -i --child tnl-0-1
 	connections {
 	  tunnel-0-1 {
 		remote_addrs  = 123.0.0.1
-		local_addrs = 123.2.1.2
+		local_addrs = 123.2.0.1
 
 		local {
 			auth = psk
