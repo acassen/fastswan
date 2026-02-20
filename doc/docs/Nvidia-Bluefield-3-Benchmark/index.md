@@ -738,8 +738,8 @@ On each IPSEC-GW a script will generate routing and strongSwan configurations :
 
 	ip r a 48.0.0.0/8 via 11.0.0.1
 	ip r a 49.0.0.0/8 via 11.1.0.1
-	ip r a 16.0.0.0/8 via 123.0.0.254
-	ip r a 17.0.0.0/8 via 123.1.0.254
+	ip r a 16.0.0.0/8 via 123.2.0.254
+	ip r a 17.0.0.0/8 via 123.3.0.254
 
 	ip link set dev dummy0 up
 	ip a a 10.10.10.10/32 dev dummy0

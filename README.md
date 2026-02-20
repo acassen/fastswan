@@ -1,3 +1,5 @@
+[![DeepWiki Doc](https://deepwiki.com/badge.svg)](https://deepwiki.com/acassen/fastswan)
+
 # fastSwan: XFRM offload via XDP
 
 <img width="40%" src="https://www.fastswan.org/assets/logo-bg.png" align="left"/>
