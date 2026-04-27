@@ -48,6 +48,7 @@ To simulate a full routing path within Simulated-NE, we create a bridge interfac
 	ip address add 192.168.101.10/24 dev p0
 	ip link set dev p1 up
 	ip address add 192.168.102.10/24 dev p1
+	ip route add 192.168.201.0/24 via 192.168.101.11
 	```
 
 ## LAB Topology: strongSwan configuration
