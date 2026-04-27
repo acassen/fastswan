@@ -48,5 +48,5 @@ struct data {
 };
 
 /* Prototypes */
-extern struct data *alloc_daemon_data(void);
-extern void free_daemon_data(void);
+struct data *alloc_daemon_data(void);
+void free_daemon_data(void);

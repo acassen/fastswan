@@ -49,53 +49,24 @@ extern struct data *daemon_data;
 
 /*
  *	BPF MAP related
+ *
+ *	Called from fswan_bpf_prog_load() right after bpf_object__load(),
+ *	wires the xfrm-specific maps into the program's bpf_maps array.
  */
-static int
-fswan_bpf_xfrm_map_load(struct fswan_bpf_opts *opts)
-{
-	int err = 0;
-
-	/* MAP ref for faster access */
-	opts->bpf_maps = MALLOC(sizeof(struct fswan_bpf_maps) * FSWAN_BPF_MAP_CNT);
-	if (!opts->bpf_maps)
-		return -1;
-
-	err = (err) ? : fswan_bpf_map_load(opts, "ipv4_xfrm_policy_lpm", FSWAN_BPF_MAP_IPV4_LPM);
-	err = (err) ? : fswan_bpf_map_load(opts, "xfrm_policy_stats_hash", FSWAN_BPF_MAP_POLICY_STATS_HASH);
-	err = (err) ? : fswan_bpf_map_load(opts, "xfrm_offload_stats_hash", FSWAN_BPF_MAP_STATS_HASH);
-
-	return err;
-}
-
 int
-fswan_bpf_xfrm_load(struct fswan_bpf_opts *opts)
+fswan_bpf_xfrm_map_load(struct fswan_bpf_prog *p)
 {
-	struct vty *vty = opts->vty;
 	int err;
 
-	/* XDP Loading */
-	err = fswan_xdp_load(opts);
-	if (err)
+	p->bpf_maps = MALLOC(sizeof(struct fswan_bpf_maps) * FSWAN_BPF_MAP_CNT);
+	if (!p->bpf_maps)
 		return -1;
 
-	/* Loading MAPs */
-	err = fswan_bpf_xfrm_map_load(opts);
-	if (err) {
-		vty_out(vty, "%% Error loading eBPF MAPs from program:%s on ifindex:%d%s"
-			   , opts->filename
-			   , opts->ifindex
-			   , VTY_NEWLINE);
+	err = fswan_bpf_map_load(p, "ipv4_xfrm_policy_lpm", FSWAN_BPF_MAP_IPV4_LPM);
+	err = err ? : fswan_bpf_map_load(p, "xfrm_policy_stats_hash", FSWAN_BPF_MAP_POLICY_STATS_HASH);
+	err = err ? : fswan_bpf_map_load(p, "xfrm_offload_stats_hash", FSWAN_BPF_MAP_STATS_HASH);
 
-		/* Unload */
-		if (opts->bpf_unload)
-			(*opts->bpf_unload) (opts);
-
-		/* Reset data */
-		memset(opts, 0, sizeof(struct fswan_bpf_opts));
-		return -1;
-	}
-
-	return 0;
+	return err;
 }
 
 
@@ -119,7 +90,7 @@ fswan_bpf_xfrm_policy_stats_alloc(size_t *sz)
 }
 
 static int
-fswan_bpf_xfrm_policy_stats_add(struct fswan_bpf_opts *opts, struct ipv4_lpm_key *lpm_key)
+fswan_bpf_xfrm_policy_stats_add(struct fswan_bpf_prog *opts, struct ipv4_lpm_key *lpm_key)
 {
 	struct bpf_map *map = opts->bpf_maps[FSWAN_BPF_MAP_POLICY_STATS_HASH].map;
 	struct xfrm_policy_stats *s;
@@ -137,7 +108,7 @@ fswan_bpf_xfrm_policy_stats_add(struct fswan_bpf_opts *opts, struct ipv4_lpm_key
 }
 
 static int
-fswan_bpf_xfrm_policy_stats_del(struct fswan_bpf_opts *opts, struct ipv4_lpm_key *lpm_key)
+fswan_bpf_xfrm_policy_stats_del(struct fswan_bpf_prog *opts, struct ipv4_lpm_key *lpm_key)
 {
 	struct bpf_map *map = opts->bpf_maps[FSWAN_BPF_MAP_POLICY_STATS_HASH].map;
 
@@ -145,7 +116,7 @@ fswan_bpf_xfrm_policy_stats_del(struct fswan_bpf_opts *opts, struct ipv4_lpm_key
 }
 
 static int
-fswan_bpf_xfrm_policy_stats_idx_reset(struct fswan_bpf_opts *opts, struct ipv4_lpm_key *lpm_key, int idx)
+fswan_bpf_xfrm_policy_stats_idx_reset(struct fswan_bpf_prog *opts, struct ipv4_lpm_key *lpm_key, int idx)
 {
 	struct bpf_map *map = opts->bpf_maps[FSWAN_BPF_MAP_POLICY_STATS_HASH].map;
 	unsigned int nr_cpus = libbpf_num_possible_cpus();
@@ -273,7 +244,7 @@ fswan_bpf_xfrm_policy_set(struct xfrm_policy *p, struct ipv4_xfrm_policy *n)
 }
 
 static int
-fswan_bpf_xfrm_policy_del(struct fswan_bpf_opts *opts, struct xfrm_policy *p, struct ipv4_xfrm_policy *pol)
+fswan_bpf_xfrm_policy_del(struct fswan_bpf_prog *opts, struct xfrm_policy *p, struct ipv4_xfrm_policy *pol)
 {
 	struct bpf_map *map = opts->bpf_maps[FSWAN_BPF_MAP_IPV4_LPM].map;
 	struct ipv4_lpm_key lpm_key = { .pfx_len = p->prefixlen_d, .pfx = p->daddr.a4 };
@@ -294,7 +265,7 @@ fswan_bpf_xfrm_policy_del(struct fswan_bpf_opts *opts, struct xfrm_policy *p, st
 }
 
 static int
-fswan_bpf_xfrm_lpm_add(struct fswan_bpf_opts *opts, struct xfrm_policy *p)
+fswan_bpf_xfrm_lpm_add(struct fswan_bpf_prog *opts, struct xfrm_policy *p)
 {
 	struct bpf_map *map = opts->bpf_maps[FSWAN_BPF_MAP_IPV4_LPM].map;
 	struct ipv4_lpm_key lpm_key = { .pfx_len = p->prefixlen_d, .pfx = p->daddr.a4 };
@@ -338,7 +309,7 @@ fswan_bpf_xfrm_lpm_add(struct fswan_bpf_opts *opts, struct xfrm_policy *p)
 }
 
 static int
-fswan_bpf_xfrm_lpm_del(struct fswan_bpf_opts *opts, struct xfrm_policy *p)
+fswan_bpf_xfrm_lpm_del(struct fswan_bpf_prog *opts, struct xfrm_policy *p)
 {
 	struct bpf_map *map = opts->bpf_maps[FSWAN_BPF_MAP_IPV4_LPM].map;
 	struct ipv4_lpm_key lpm_key = { .pfx_len = p->prefixlen_d, .pfx = p->daddr.a4 };
@@ -365,7 +336,7 @@ fswan_bpf_xfrm_lpm_del(struct fswan_bpf_opts *opts, struct xfrm_policy *p)
 
 
 static int
-fswan_bpf_xfrm_lpm_action(int action, struct fswan_bpf_opts *opts, struct xfrm_policy *p)
+fswan_bpf_xfrm_lpm_action(int action, struct fswan_bpf_prog *opts, struct xfrm_policy *p)
 {
 	char errmsg[FSWAN_XDP_STRERR_BUFSIZE];
 	int err = 0;
@@ -391,7 +362,7 @@ fswan_bpf_xfrm_lpm_action(int action, struct fswan_bpf_opts *opts, struct xfrm_p
 	log_message(LOG_INFO, "%s(): %s: %s XFRM-Policy="
 			      "{src:%u.%u.%u.%u/%d, dst:%u.%u.%u.%u/%d, ifindex:%d, dir:%s}"
 			    , __FUNCTION__
-			    , opts->label
+			    , opts->name
 			    , (action == XFRM_MSG_NEWPOLICY) ? "adding" : "deleting"
 			    , NIPQUAD(p->saddr.a4), p->prefixlen_s
 			    , NIPQUAD(p->daddr.a4), p->prefixlen_d
@@ -404,7 +375,7 @@ int
 fswan_bpf_xfrm_action(int action, struct xfrm_policy *p)
 {
 	struct list_head *l = &daemon_data->bpf_progs;
-	struct fswan_bpf_opts *opts;
+	struct fswan_bpf_prog *opts;
 	int err;
 
 	/* If daemon is currently stopping, we simply skip action on ruleset.
@@ -432,7 +403,7 @@ fswan_bpf_xfrm_action(int action, struct xfrm_policy *p)
 }
 
 static int
-fswan_bpf_xfrm_policy_counters_vty(struct vty *vty, struct fswan_bpf_opts *opts, struct ipv4_xfrm_policy *p, int idx)
+fswan_bpf_xfrm_policy_counters_vty(struct vty *vty, struct fswan_bpf_prog *opts, struct ipv4_xfrm_policy *p, int idx)
 {
 	struct bpf_map *map = opts->bpf_maps[FSWAN_BPF_MAP_POLICY_STATS_HASH].map;
 	struct ipv4_lpm_key lpm_key = { .pfx_len = p->pfx_len, .pfx = p->pfx };
@@ -462,7 +433,7 @@ fswan_bpf_xfrm_policy_counters_vty(struct vty *vty, struct fswan_bpf_opts *opts,
 		bytes += s[i].src_pfx[idx].bytes;
 	}
 
-	vty_out(vty, "   %s:\tpkts:%ld bytes:%ld%s", opts->label, pkts, bytes, VTY_NEWLINE);
+	vty_out(vty, "   %s:\tpkts:%ld bytes:%ld%s", opts->name, pkts, bytes, VTY_NEWLINE);
 
   end:
 	free(s);
@@ -470,11 +441,11 @@ fswan_bpf_xfrm_policy_counters_vty(struct vty *vty, struct fswan_bpf_opts *opts,
 }
 
 static int
-fswan_bpf_xfrm_policy_stats_vty(struct vty *vty, struct fswan_bpf_opts *o, struct ipv4_lpm_key *key,
+fswan_bpf_xfrm_policy_stats_vty(struct vty *vty, struct fswan_bpf_prog *o, struct ipv4_lpm_key *key,
 				struct ipv4_xfrm_policy *policy, int idx)
 {
 	struct list_head *l = &daemon_data->bpf_progs;
-	struct fswan_bpf_opts *opts = o;
+	struct fswan_bpf_prog *opts = o;
 	struct bpf_map *map;
 	struct ipv4_xfrm_policy *p;
 	char errmsg[FSWAN_XDP_STRERR_BUFSIZE];
@@ -499,7 +470,7 @@ fswan_bpf_xfrm_policy_stats_vty(struct vty *vty, struct fswan_bpf_opts *o, struc
 		if (err) {
 			libbpf_strerror(err, errmsg, FSWAN_XDP_STRERR_BUFSIZE);
 			vty_out(vty, "%% [%s] error fetching value for pfx:%u.%u.%u.%u/%u (%s)%s"
-				   , opts->label, NIPQUAD(key->pfx), key->pfx_len, errmsg, VTY_NEWLINE);
+				   , opts->name, NIPQUAD(key->pfx), key->pfx_len, errmsg, VTY_NEWLINE);
 			continue;
 		}
 
@@ -511,7 +482,7 @@ fswan_bpf_xfrm_policy_stats_vty(struct vty *vty, struct fswan_bpf_opts *o, struc
 }
 
 static int
-fswan_bpf_xfrm_policy_pfx_vty(struct vty *vty, struct fswan_bpf_opts *opts, struct ipv4_lpm_key *key,
+fswan_bpf_xfrm_policy_pfx_vty(struct vty *vty, struct fswan_bpf_prog *opts, struct ipv4_lpm_key *key,
 			      struct ipv4_xfrm_policy *p, bool stats)
 {
 	struct ipv4_pfx *pfx;
@@ -550,14 +521,14 @@ static int
 fswan_bpf_xfrm_policy_vty(struct vty *vty, bool stats)
 {
 	struct ipv4_lpm_key key = { 0 }, next_key = { 0 };
-	struct fswan_bpf_opts *opts;
+	struct fswan_bpf_prog *opts;
 	struct bpf_map *map;
 	struct ipv4_xfrm_policy *p;
 	char errmsg[FSWAN_XDP_STRERR_BUFSIZE];
 	int err = 0;
 
 	/* rules are mirred into every eBPF progs, first one is good enough */
-	opts = list_first_entry(&daemon_data->bpf_progs, struct fswan_bpf_opts, next);
+	opts = list_first_entry(&daemon_data->bpf_progs, struct fswan_bpf_prog, next);
 	map = opts->bpf_maps[FSWAN_BPF_MAP_IPV4_LPM].map;
 
 	PMALLOC(p);
@@ -569,7 +540,7 @@ fswan_bpf_xfrm_policy_vty(struct vty *vty, bool stats)
 		if (err) {
 			libbpf_strerror(err, errmsg, FSWAN_XDP_STRERR_BUFSIZE);
 			vty_out(vty, "%% [%s] error fetching value for pfx:%u.%u.%u.%u/%u (%s)%s"
-				   , opts->label, NIPQUAD(key.pfx), key.pfx_len, errmsg, VTY_NEWLINE);
+				   , opts->name, NIPQUAD(key.pfx), key.pfx_len, errmsg, VTY_NEWLINE);
 			continue;
 		}
 
@@ -610,20 +581,6 @@ fswan_if_stats_reset(void)
 	}
 }
 
-static struct interface *
-fswan_if_get_by_ifindex(int ifindex)
-{
-	struct list_head *l = &daemon_data->interfaces;
-	struct interface *ifi;
-
-	list_for_each_entry(ifi, l, next) {
-		if (ifi->ifindex == ifindex)
-			return ifi;
-	}
-
-	return NULL;
-}
-
 static struct xfrm_offload_stats *
 fswan_bpf_xfrm_stats_alloc(size_t *sz)
 {
@@ -652,7 +609,7 @@ fswan_bpf_xfrm_stats_set(struct xfrm_offload_stats *s, int ifindex)
 }
 
 static int
-fswan_xfrm_offload_stats_update(struct vty *vty, struct fswan_bpf_opts *opts)
+fswan_xfrm_offload_stats_update(struct vty *vty, struct fswan_bpf_prog *opts)
 {
 	struct bpf_map *map = opts->bpf_maps[FSWAN_BPF_MAP_STATS_HASH].map;
 	unsigned int nr_cpus = libbpf_num_possible_cpus();
@@ -731,7 +688,7 @@ int
 fswan_xfrm_stats_vty(struct vty *vty)
 {
 	struct list_head *l = &daemon_data->bpf_progs;
-	struct fswan_bpf_opts *opts;
+	struct fswan_bpf_prog *opts;
 
 	if (__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags)) {
 		vty_out(vty, "%% Statistics are currently disabled...%s", VTY_NEWLINE);
@@ -746,7 +703,7 @@ fswan_xfrm_stats_vty(struct vty *vty)
 }
 
 static int
-fswan_bpf_xfrm_stats_insert(struct fswan_bpf_opts *opts, struct xfrm_offload_stats *s, size_t sz)
+fswan_bpf_xfrm_stats_insert(struct fswan_bpf_prog *opts, struct xfrm_offload_stats *s, size_t sz)
 {
 	struct bpf_map *map = opts->bpf_maps[FSWAN_BPF_MAP_STATS_HASH].map;
 	uint32_t key = s[0].ifindex;
@@ -766,26 +723,23 @@ fswan_bpf_xfrm_stats_insert(struct fswan_bpf_opts *opts, struct xfrm_offload_sta
 	return 0;
 }
 
+/*
+ *	Seed one xfrm_offload_stats slot for the (program, interface) pair.
+ *	Called from fswan_bpf_prog_attach() right after the XDP link is up.
+ */
 int
-fswan_bpf_xfrm_stats_init(struct fswan_bpf_opts *opts)
+fswan_bpf_xfrm_stats_init_iface(struct fswan_bpf_prog *p, struct interface *iface)
 {
-	struct list_head *l = &daemon_data->interfaces;
 	struct xfrm_offload_stats *new;
-	struct interface *ifi;
 	size_t sz;
 	int err;
 
-	list_for_each_entry(ifi, l, next) {
-		new = fswan_bpf_xfrm_stats_alloc(&sz);
-		if (!new)
-			return -1;
+	new = fswan_bpf_xfrm_stats_alloc(&sz);
+	if (!new)
+		return -1;
 
-		fswan_bpf_xfrm_stats_set(new, ifi->ifindex);
-		err = fswan_bpf_xfrm_stats_insert(opts, new, sz);
-		free(new);
-		if (err)
-			return -1;
-	}
-
-	return 0;
+	fswan_bpf_xfrm_stats_set(new, iface->ifindex);
+	err = fswan_bpf_xfrm_stats_insert(p, new, sz);
+	free(new);
+	return err;
 }

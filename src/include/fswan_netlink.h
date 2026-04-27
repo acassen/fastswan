@@ -81,6 +81,6 @@ struct xfrm_policy {
 
 
 /* Prototypes */
-extern int netlink_xfrm_lookup(void);
-extern int fswan_netlink_init(void);
-extern int fswan_netlink_destroy(void);
+int netlink_xfrm_lookup(void);
+int fswan_netlink_init(void);
+int fswan_netlink_destroy(void);

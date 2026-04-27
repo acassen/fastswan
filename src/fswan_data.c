@@ -29,6 +29,7 @@
 /* local includes */
 #include "memory.h"
 #include "fswan_data.h"
+#include "fswan_if.h"
 #include "fswan_bpf.h"
 #include "fswan_netlink.h"
 
@@ -58,6 +59,7 @@ void
 free_daemon_data(void)
 {
 	fswan_netlink_destroy();
+	fswan_if_destroy_all();
 	fswan_bpf_destroy();
 	FREE(daemon_data);
 }

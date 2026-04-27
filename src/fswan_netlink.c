@@ -42,7 +42,6 @@
 #include "utils.h"
 #include "thread.h"
 #include "fswan_data.h"
-#include "fswan_if.h"
 #include "fswan_netlink.h"
 #include "fswan_bpf_xfrm.h"
 
@@ -564,107 +563,12 @@ netlink_xfrm_lookup(void)
 
 
 /*
- *	Netlink Interface lookup
- */
-static int
-netlink_if_request(struct nl_handle *nl, unsigned char family, uint16_t type)
-{
-	ssize_t status;
-	struct sockaddr_nl snl = { .nl_family = AF_NETLINK };
-	struct {
-		struct nlmsghdr nlh;
-		struct ifinfomsg i;
-		char buf[64];
-	} req = {
-		.nlh.nlmsg_len = NLMSG_LENGTH(sizeof req.i),
-		.nlh.nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST,
-		.nlh.nlmsg_type = type,
-		.nlh.nlmsg_pid = 0,
-		.nlh.nlmsg_seq = ++nl->seq,
-		.i.ifi_family = family,
-	};
-	__u32 filt_mask = RTEXT_FILTER_SKIP_STATS;
-
-	addattr_l(&req.nlh, sizeof req, IFLA_EXT_MASK, &filt_mask, sizeof(uint32_t));
-
-	status = sendto(nl->fd, (void *) &req, sizeof (req), 0
-			      , (struct sockaddr *) &snl, sizeof(snl));
-	if (status < 0) {
-		log_message(LOG_INFO, "Netlink: sendto() failed: %m");
-		return -1;
-	}
-
-	return 0;
-}
-
-static int
-netlink_if_link_filter(__attribute__((unused)) struct sockaddr_nl *snl, struct nlmsghdr *h)
-{
-	struct ifinfomsg *ifi;
-	struct rtattr *tb[IFLA_MAX + 1];
-	struct interface *new;
-	char *name;
-	size_t len;
-
-	ifi = NLMSG_DATA(h);
-
-	if (h->nlmsg_type != RTM_NEWLINK)
-		return 0;
-
-	if (h->nlmsg_len < NLMSG_LENGTH(sizeof (struct ifinfomsg)))
-		return -1;
-	len = h->nlmsg_len - NLMSG_LENGTH(sizeof (struct ifinfomsg));
-
-	parse_rtattr(tb, IFLA_MAX, IFLA_RTA(ifi), len);
-
-	/* Append */
-	PMALLOC(new);
-	new->ifindex = ifi->ifi_index;
-	name = (char *)RTA_DATA(tb[IFLA_IFNAME]);
-	strlcpy(new->ifname, name, IF_NAMESIZE);
-	INIT_LIST_HEAD(&new->next);
-
-	list_add_tail(&new->next, &daemon_data->interfaces);
-	return 0;
-}
-
-static int
-netlink_if_lookup(void)
-{
-	int err = 0;
-
-	if (!list_empty(&daemon_data->interfaces))
-		return -1;
-
-	err = netlink_open(&nl_cmd, daemon_data->nl_rcvbuf_size, SOCK_NONBLOCK, NETLINK_ROUTE
-				  , 0, 0);
-	if (err) {
-		log_message(LOG_INFO, "Error while creating Kernel netlink command channel");
-		return -1;
-	}
-
-	if (netlink_if_request(&nl_cmd, AF_PACKET, RTM_GETLINK) < 0) {
-		err = -1;
-		goto end;
-	}
-
-	netlink_parse_info(netlink_if_link_filter, &nl_cmd, NULL, false);
-  end:
-	netlink_close(&nl_cmd);
-	return err;
-}
-
-
-/*
  *	Kernel Netlink channel init
  */
 int
 fswan_netlink_init(void)
 {
 	int err;
-
-	/* Interface lookup */
-	netlink_if_lookup();
 
 	/* Register Kernel netlink reflector */
 	err = netlink_open(&nl_kernel, daemon_data->nl_rcvbuf_size, SOCK_NONBLOCK, NETLINK_XFRM
@@ -687,11 +591,6 @@ fswan_netlink_init(void)
 int
 fswan_netlink_destroy(void)
 {
-	struct interface *ifi, *ifi_tmp;
-
-	list_for_each_entry_safe(ifi, ifi_tmp, &daemon_data->interfaces, next)
-		FREE(ifi);
-
 	log_message(LOG_INFO, "Unregistering Kernel netlink reflector");
 	netlink_close(&nl_kernel);
 	return 0;

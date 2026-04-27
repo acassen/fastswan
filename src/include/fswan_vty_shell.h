@@ -23,4 +23,4 @@
 #pragma once
 
 /* Prototypes */
-extern int fswan_vtysh(const char *path);
+int fswan_vtysh(const char *path);

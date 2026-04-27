@@ -6,7 +6,7 @@
  *              mode, all IPSEC ESP operations are done by the hardware to
  *              offload the kernel for crypto and packet handling. To further
  *              increase perfs we implement kernel routing offload via XDP.
- *              A XFRM kernel netlink reflector is dynamically andi
+ *              A XFRM kernel netlink reflector is dynamically and
  *              transparently mirroring kernel XFRM policies to the XDP layer
  *              for kernel netstack bypass. fastSwan is an XFRM offload feature.
  *
@@ -18,26 +18,36 @@
  *              either version 3.0 of the License, or (at your option) any later
  *              version.
  *
- * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
 #pragma once
 
 #include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
 #include <net/if.h>
 
 #include "list_head.h"
 
-/* Defines */
-#define IF_DEFAULT_CONNECTION_KEEPIDLE		20
-#define IF_DEFAULT_CONNECTION_KEEPCNT		2
-#define IF_DEFAULT_CONNECTION_KEEPINTVL		10
+/* Forward declarations */
+struct bpf_link;
+struct fswan_bpf_prog;
+
+/* Per-interface flags */
+enum fswan_interface_flags {
+	FSWAN_INTERFACE_FL_SHUTDOWN_BIT,
+	FSWAN_INTERFACE_FL_RUNNING_BIT,
+};
 
 /* Types */
 struct interface {
 	char			ifname[IF_NAMESIZE];
 	int			ifindex;
+	char			description[128];
+
+	/* attached BPF program */
+	struct fswan_bpf_prog	*bpf_prog;
+	struct list_head	bpf_prog_list;	/* in bpf_prog->iface_bind_list */
+	struct bpf_link		*bpf_xdp_lnk;
 
 	/* statistics */
 	uint64_t		rx_pkts;
@@ -45,28 +55,14 @@ struct interface {
 	uint64_t		tx_pkts;
 	uint64_t		tx_bytes;
 
-	struct list_head	next;
+	unsigned long		flags;
+	struct list_head	next;		/* in daemon_data->interfaces */
 };
 
 
 /* Prototypes */
-extern int if_setsockopt_reuseaddr(int, int);
-extern int if_setsockopt_nolinger(int, int);
-extern int if_setsockopt_tcpcork(int, int);
-extern int if_setsockopt_nodelay(int, int);
-extern int if_setsockopt_keepalive(int, int);
-extern int if_setsockopt_tcp_keepidle(int, int);
-extern int if_setsockopt_tcp_keepcnt(int, int);
-extern int if_setsockopt_tcp_keepintvl(int, int);
-extern int if_setsockopt_rcvtimeo(int, int);
-extern int if_setsockopt_sndtimeo(int, int);
-extern int if_setsockopt_reuseport(int, int);
-extern int if_setsockopt_hdrincl(int);
-extern int if_setsockopt_broadcast(int);
-extern int if_setsockopt_promisc(int, int, bool);
-extern int if_setsockopt_attach_bpf(int, int);
-extern int if_setsockopt_no_receive(int *);
-extern int if_setsockopt_rcvbuf(int *, int);
-extern int if_setsockopt_bindtodevice(int *, const char *);
-extern int if_setsockopt_priority(int *, int);
-extern int if_nametohwaddr(const char *, unsigned char *, size_t);
+struct interface *fswan_if_alloc(const char *name, int ifindex);
+struct interface *fswan_if_get(const char *name, bool alloc);
+struct interface *fswan_if_get_by_ifindex(int ifindex);
+void fswan_if_destroy(struct interface *iface);
+void fswan_if_destroy_all(void);

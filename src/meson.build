@@ -25,10 +25,12 @@ subdir('bpf')
 
 src += files(
   'fswan_bpf.c',
-  'fswan_bpf_vty.c',
+  'fswan_bpf_prog.c',
+  'fswan_bpf_prog_vty.c',
   'fswan_bpf_xfrm.c',
   'fswan_data.c',
   'fswan_if.c',
+  'fswan_if_vty.c',
   'fswan_netlink.c',
   'fswan_vty.c',
   'fswan_vty_shell.c',
