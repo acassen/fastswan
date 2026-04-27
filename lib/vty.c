@@ -59,7 +59,7 @@ static int vty_connections;
 #define VTY_MAX_CONNECTIONS	16
 
 /* Integrated configuration file path */
-#define SYSCONFDIR      "/etc/gtp-guard"
+#define SYSCONFDIR      "/etc/fastswan"
 
 
 /* VTY standard output function. */

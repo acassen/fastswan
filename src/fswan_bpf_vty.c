@@ -6,7 +6,7 @@
  *              mode, all IPSEC ESP operations are done by the hardware to
  *              offload the kernel for crypto and packet handling. To further
  *              increase perfs we implement kernel routing offload via XDP.
- *              A XFRM kernel netlink reflector is dynamically andi
+ *              A XFRM kernel netlink reflector is dynamically and
  *              transparently mirroring kernel XFRM policies to the XDP layer
  *              for kernel netstack bypass. fastSwan is an XFRM offload feature.
  *
@@ -18,30 +18,25 @@
  *              either version 3.0 of the License, or (at your option) any later
  *              version.
  *
- * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
 
 /* system includes */
-#include <pthread.h>
-#include <sys/stat.h>
 #include <net/if.h>
 
 /* local includes */
 #include "memory.h"
 #include "bitops.h"
 #include "list_head.h"
-#include "thread.h"
 #include "vty.h"
 #include "command.h"
 #include "fswan_data.h"
 #include "fswan_bpf.h"
 #include "fswan_bpf_xfrm.h"
-#include "fswan_netlink.h"
 
 
 /* Extern data */
 extern struct data *daemon_data;
-extern struct thread_master *master;
 
 
 /*
@@ -50,7 +45,7 @@ extern struct thread_master *master;
 DEFUN(bpf,
       bpf_cmd,
       "bpf",
-      "Configure BPF progs\n")
+      "Enter the BPF subsystem to load and manage XDP/eBPF programs and their maps\n")
 {
 	vty->node = BPF_PROG_NODE;
 	return CMD_SUCCESS;
@@ -59,14 +54,14 @@ DEFUN(bpf,
 DEFUN(bpf_xdp_xfrm,
       bpf_xdp_xfrm_cmd,
       "xdp-xfrm STRING object-file STRING interface STRING [progname STRING]",
-      "XDP-XFRM\n"
-      "label\n"
-      "BPF object file\n"
-      "PATH to BPF prog\n"
-      "interface to attach to\n"
-      "interface name\n"
-      "BPF Program Name\n"
-      "Name\n")
+      "Load the XFRM offload eBPF program and attach it to a netdev in XDP driver mode\n"
+      "Symbolic label identifying this loaded program instance for later reference\n"
+      "Specify the compiled BPF object file containing the XFRM offload program\n"
+      "Filesystem path to the .bpf object (typically xfrm_offload.bpf)\n"
+      "Network interface that will run the XDP program in driver/native mode\n"
+      "Interface name (e.g. eth0) where the XDP program is attached\n"
+      "Override the BPF program/section name to attach\n"
+      "Section name inside the object file (default: first XDP program found)\n")
 {
 	struct list_head *l = &daemon_data->bpf_progs;
 	struct fswan_bpf_opts *opts;
@@ -74,8 +69,7 @@ DEFUN(bpf_xdp_xfrm,
 
 	if (fswan_bpf_opts_exist(l, argc, argv)) {
 		vty_out(vty, "%% XDP BPF program already loaded on interface %s!!!%s"
-			   , argv[1]
-			   , VTY_NEWLINE);
+			   , argv[1], VTY_NEWLINE);
 		return CMD_WARNING;
 	}
 
@@ -95,26 +89,20 @@ DEFUN(bpf_xdp_xfrm,
 DEFUN(no_bpf_xdp_xfrm,
       no_bpf_xdp_xfrm_cmd,
       "no xdp-xfrm STRING object-file STRING interface STRING",
-      "XDP-XFRM\n"
-      "label\n"
-      "BPF object file\n"
-      "PATH to BPF prog\n"
-      "interface to attach to\n"
-      "interface name\n")
+      "Detach and unload a previously loaded XDP XFRM offload program\n"
+      "Label of the program instance to remove (must match the label used at load time)\n"
+      "Object file argument used at load time\n"
+      "Path to the .bpf object (must match the load arguments)\n"
+      "Interface argument used at load time\n"
+      "Interface name where the program is currently attached\n")
 {
 	struct list_head *l = &daemon_data->bpf_progs;
 	struct fswan_bpf_opts *opts;
 
-	if (argc < 2) {
-		vty_out(vty, "%% missing arguments%s", VTY_NEWLINE);
-		return CMD_WARNING;
-	}
-
 	opts = fswan_bpf_opts_exist(l, argc, argv);
 	if (!opts) {
 		vty_out(vty, "%% unknown XDP BPF program %s on interface %s !!!%s"
-			   , argv[0], argv[1]
-			   , VTY_NEWLINE);
+			   , argv[0], argv[1], VTY_NEWLINE);
 		return CMD_WARNING;
 	}
 
@@ -125,213 +113,19 @@ DEFUN(no_bpf_xdp_xfrm,
 	return CMD_SUCCESS;
 }
 
-DEFUN(load_existing_xfrm_policy,
-      load_existing_xfrm_policy_cmd,
-      "load-existing-xfrm-policy",
-      "Load existing kernel xfrm policy\n")
-{
-	int err;
-
-	if (!__test_bit(FSWAN_FL_XDP_XFRM_LOADED_BIT, &daemon_data->flags)) {
-		vty_out(vty, "%% XDP XFRM offload is not configured. Ignoring%s"
-			   , VTY_NEWLINE);
-		return CMD_WARNING;
-	}
-
-	if (__test_bit(FSWAN_FL_XFRM_KERNEL_LOADED_BIT, &daemon_data->flags)) {
-		vty_out(vty, "%% Existing kernel XFRM policy already loaded. Ignoring%s"
-			   , VTY_NEWLINE);
-		return CMD_WARNING;
-	}
-
-	err = netlink_xfrm_lookup();
-	if (err) {
-		vty_out(vty, "%% Error requesting kernel for existing XFRM policies%s"
-			   , VTY_NEWLINE);
-		return CMD_WARNING;
-	}
-
-	__set_bit(FSWAN_FL_XFRM_KERNEL_LOADED_BIT, &daemon_data->flags);
-	return CMD_SUCCESS;
-}
-
-DEFUN(disable_xdp_xfrm_offload_stats,
-      disable_xdp_xfrm_stats_offload_cmd,
-      "disable-xdp-xfrm-offload-statistics",
-      "Disable XDP XFRM Offload statistics counters\n")
-{
-	if (!__test_bit(FSWAN_FL_XDP_XFRM_LOADED_BIT, &daemon_data->flags)) {
-		vty_out(vty, "%% XDP XFRM offload is not configured. Ignoring%s"
-			   , VTY_NEWLINE);
-		return CMD_WARNING;
-	}
-
-	if (__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags)) {
-		vty_out(vty, "%% XDP XFRM Statistics already disabled. Ignoring%s"
-			   , VTY_NEWLINE);
-		return CMD_WARNING;
-	}
-
-	__set_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags);
-	return CMD_SUCCESS;
-}
-
-DEFUN(no_disable_xdp_xfrm_offload_stats,
-      no_disable_xdp_xfrm_stats_offload_cmd,
-      "no disable-xdp-xfrm-offload-statistics",
-      "Enable XDP XFRM Offload statistics counters\n")
-{
-	if (!__test_bit(FSWAN_FL_XDP_XFRM_LOADED_BIT, &daemon_data->flags)) {
-		vty_out(vty, "%% XDP XFRM offload is not configured. Ignoring%s"
-			   , VTY_NEWLINE);
-		return CMD_WARNING;
-	}
-
-	if (!__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags)) {
-		vty_out(vty, "%% XDP XFRM Statistics already enabled. Ignoring%s"
-			   , VTY_NEWLINE);
-		return CMD_WARNING;
-	}
-
-	__clear_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags);
-	return CMD_SUCCESS;
-}
-
-DEFUN(disable_xdp_xfrm_src_match,
-      disable_xdp_xfrm_src_match_cmd,
-      "disable-xdp-xfrm-source-matching",
-      "Disable XDP XFRM IP Source matching\n")
-{
-	if (!__test_bit(FSWAN_FL_XDP_XFRM_LOADED_BIT, &daemon_data->flags)) {
-		vty_out(vty, "%% XDP XFRM offload is not configured. Ignoring%s"
-			   , VTY_NEWLINE);
-		return CMD_WARNING;
-	}
-
-	if (__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_SRC_MATCH_BIT, &daemon_data->flags)) {
-		vty_out(vty, "%% XDP XFRM source matching already disabled. Ignoring%s"
-			   , VTY_NEWLINE);
-		return CMD_WARNING;
-	}
-
-	__set_bit(FSWAN_FL_XDP_XFRM_DISABLE_SRC_MATCH_BIT, &daemon_data->flags);
-	return CMD_SUCCESS;
-}
-
-DEFUN(no_disable_xdp_xfrm_src_match,
-      no_disable_xdp_xfrm_src_match_cmd,
-      "no disable-xdp-xfrm-source-matching",
-      "Enable XDP XFRM IP Source matching\n")
-{
-	if (!__test_bit(FSWAN_FL_XDP_XFRM_LOADED_BIT, &daemon_data->flags)) {
-		vty_out(vty, "%% XDP XFRM offload is not configured. Ignoring%s"
-			   , VTY_NEWLINE);
-		return CMD_WARNING;
-	}
-
-	if (!__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_SRC_MATCH_BIT, &daemon_data->flags)) {
-		vty_out(vty, "%% XDP XFRM source matching already enabled. Ignoring%s"
-			   , VTY_NEWLINE);
-		return CMD_WARNING;
-	}
-
-	__clear_bit(FSWAN_FL_XDP_XFRM_DISABLE_SRC_MATCH_BIT, &daemon_data->flags);
-	return CMD_SUCCESS;
-}
-
-DEFUN(show_xdp_xfrm_offload_policy,
-      show_xdp_xfrm_offload_policy_cmd,
-      "show xdp xfrm offload policy",
-      SHOW_STR
-      "XDP XFRM offload policy\n")
-{
-	int err;
-
-	if (!__test_bit(FSWAN_FL_XDP_XFRM_LOADED_BIT, &daemon_data->flags)) {
-		vty_out(vty, "%% XDP XFRM offload is not configured. Ignoring%s"
-			   , VTY_NEWLINE);
-		return CMD_WARNING;
-	}
-
-	err = fswan_xfrm_policy_vty(vty);
-	if (err) {
-		vty_out(vty, "%% Error displaying XDP XFRM policies%s"
-			   , VTY_NEWLINE);
-		return CMD_WARNING;
-	}
-
-	return CMD_SUCCESS;
-}
-
-DEFUN(show_xdp_xfrm_offload_policy_stats,
-      show_xdp_xfrm_offload_policy_stats_cmd,
-      "show xdp xfrm offload policy statistcs",
-      SHOW_STR
-      "XDP XFRM offload policy statistics\n")
-{
-	int err;
-
-	if (!__test_bit(FSWAN_FL_XDP_XFRM_LOADED_BIT, &daemon_data->flags)) {
-		vty_out(vty, "%% XDP XFRM offload is not configured. Ignoring%s"
-			   , VTY_NEWLINE);
-		return CMD_WARNING;
-	}
-
-	err = fswan_xfrm_policy_stats_vty(vty);
-	if (err) {
-		vty_out(vty, "%% Error displaying XDP XFRM policies%s"
-			   , VTY_NEWLINE);
-		return CMD_WARNING;
-	}
-
-	return CMD_SUCCESS;
-}
-
-DEFUN(show_xdp_xfrm_offload_stats,
-      show_xdp_xfrm_offload_stats_cmd,
-      "show xdp xfrm offload statistics",
-      SHOW_STR
-      "XDP XFRM offload statistics\n")
-{
-	int err;
-
-	if (!__test_bit(FSWAN_FL_XDP_XFRM_LOADED_BIT, &daemon_data->flags)) {
-		vty_out(vty, "%% XDP XFRM offload is not configured. Ignoring%s"
-			   , VTY_NEWLINE);
-		return CMD_WARNING;
-	}
-
-	err = fswan_xfrm_stats_vty(vty);
-	if (err) {
-		vty_out(vty, "%% Error displaying XDP XFRM statistics%s"
-			   , VTY_NEWLINE);
-		return CMD_WARNING;
-	}
-
-	return CMD_SUCCESS;
-}
-
-
 /* Configuration writer */
 static int
 fswan_bpf_opts_config_write(struct vty *vty, struct fswan_bpf_opts *opts)
 {
 	char ifname[IF_NAMESIZE];
+	const char *progname = opts->progname[0] ? opts->progname : NULL;
 
-	if (opts->progname[0]) {
-		vty_out(vty, " xdp-xfrm %s object-file %s interface %s progname %s%s"
-			   , opts->label
-			   , opts->filename
-			   , if_indextoname(opts->ifindex, ifname)
-			   , opts->progname
-			   , VTY_NEWLINE);
-		return 0;
-	}
-
-	vty_out(vty, " xdp-xfrm %s object-file %s interface %s%s"
+	vty_out(vty, " xdp-xfrm %s object-file %s interface %s%s%s%s"
 		   , opts->label
 		   , opts->filename
 		   , if_indextoname(opts->ifindex, ifname)
+		   , progname ? " progname " : ""
+		   , progname ? progname : ""
 		   , VTY_NEWLINE);
 	return 0;
 }
@@ -373,21 +167,6 @@ cmd_ext_bpf_install(void)
 	install_default(BPF_PROG_NODE);
 	install_element(BPF_PROG_NODE, &bpf_xdp_xfrm_cmd);
 	install_element(BPF_PROG_NODE, &no_bpf_xdp_xfrm_cmd);
-
-	/* Install global configuration commands */
-	install_element(CONFIG_NODE, &load_existing_xfrm_policy_cmd);
-	install_element(CONFIG_NODE, &disable_xdp_xfrm_stats_offload_cmd);
-	install_element(CONFIG_NODE, &no_disable_xdp_xfrm_stats_offload_cmd);
-	install_element(CONFIG_NODE, &disable_xdp_xfrm_src_match_cmd);
-	install_element(CONFIG_NODE, &no_disable_xdp_xfrm_src_match_cmd);
-
-	/* Install show commands */
-	install_element(VIEW_NODE, &show_xdp_xfrm_offload_policy_cmd);
-	install_element(VIEW_NODE, &show_xdp_xfrm_offload_policy_stats_cmd);
-	install_element(VIEW_NODE, &show_xdp_xfrm_offload_stats_cmd);
-	install_element(ENABLE_NODE, &show_xdp_xfrm_offload_policy_cmd);
-	install_element(ENABLE_NODE, &show_xdp_xfrm_offload_policy_stats_cmd);
-	install_element(ENABLE_NODE, &show_xdp_xfrm_offload_stats_cmd);
 
 	return 0;
 }

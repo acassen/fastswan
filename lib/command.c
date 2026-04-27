@@ -62,7 +62,7 @@ static struct cmd_node config_node = {
 };
 
 /* Default motd string. */
-static const char *default_motd = "\r\n Welcome to GTP-Guard VTY\r\n\r\n";
+static const char *default_motd = "\r\n Welcome to fastSwan VTY\r\n\r\n";
 
 
 /* Utility function to concatenate argv argument into a single string

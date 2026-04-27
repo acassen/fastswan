@@ -44,6 +44,7 @@
 #include "command.h"
 #include "fswan_data.h"
 #include "fswan_netlink.h"
+#include "fswan_vty_shell.h"
 #include "main.h"
 
 
@@ -135,6 +136,7 @@ usage(const char *prog)
 		"Commands:\n"
 		"Either long or short options are allowed.\n"
 		"  %s --dont-fork          -n    Dont fork the daemon process.\n"
+		"  %s --vty-shell/--cli    -C    Open VTY Shell with local daemon.\n"
 		"  %s --use-file           -f    Use the specified configuration file.\n"
 		"                                Default is /etc/fastswan/fastswan.conf.\n"
 		"  %s --enable-bpf-debug   -b    Enable verbose libbpf log debug.\n"
@@ -144,7 +146,7 @@ usage(const char *prog)
 		"  %s --log-facility       -S    0-7 Set syslog facility to LOG_LOCAL[0-7]. (default=LOG_DAEMON)\n"
 		"  %s --help               -h    Display this short inlined help screen.\n"
 		"  %s --version            -v    Display the version number\n",
-		prog, prog, prog, prog, prog, prog, prog, prog, prog);
+		prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
 /* Command line parser */
@@ -162,13 +164,19 @@ parse_cmdline(int argc, char **argv)
 		{"dump-conf",		no_argument,		NULL, 'd'},
 		{"enable-bpf-debug",	no_argument,		NULL, 'b'},
 		{"use-file",		required_argument,	NULL, 'f'},
+		{"vty-shell",		optional_argument,	NULL, 'C'},
+		{"cli",			optional_argument,	NULL, 'V'},
 		{"version",		no_argument,		NULL, 'v'},
 		{"help",		no_argument,		NULL, 'h'},
 		{NULL,			0,			NULL,  0 }
 	};
 
+	/* VTY Shell. force default value for login Shell */
+	if (argv[0][0] == '-')
+		exit(fswan_vtysh(default_vty_shell_file));
+
 	curind = optind;
-	while (longindex = -1, (c = getopt_long(argc, argv, ":vhlndDbf:S:"
+	while (longindex = -1, (c = getopt_long(argc, argv, ":vhlndDbf:C::S:"
 						, long_options, &longindex)) != -1) {
 		if (longindex >= 0 && long_options[longindex].has_arg == required_argument &&
 		    optarg && !optarg[0]) {
@@ -208,6 +216,10 @@ parse_cmdline(int argc, char **argv)
 			break;
 		case 'f':
 			conf_file = optarg;
+			break;
+		case 'V':
+			vty_shell_file = optarg;
+			exit(fswan_vtysh(vty_shell_file ? : default_vty_shell_file));
 			break;
 		case '?':
 			if (optopt && argv[curind][1] != '-')

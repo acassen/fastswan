@@ -15,19 +15,12 @@
  */
 struct host {
 	char			*name;			/* Host name of this router. */
-
 	char			*password;		/* Password for vty interface. */
-
 	char			*enable;		/* Enable password */
-
 	int			lines;			/* System wide terminal lines. */
-
 	char			*logfile;		/* Log filename. */
-
 	char			*config;		/* config file name of this host */
-
 	int			advanced;		/* Flags for services */
-
 	const char		*motd;			/* Banner configuration. */
 	char			*motdfile;
 };

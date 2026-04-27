@@ -6,7 +6,7 @@
  *              mode, all IPSEC ESP operations are done by the hardware to
  *              offload the kernel for crypto and packet handling. To further
  *              increase perfs we implement kernel routing offload via XDP.
- *              A XFRM kernel netlink reflector is dynamically andi
+ *              A XFRM kernel netlink reflector is dynamically and
  *              transparently mirroring kernel XFRM policies to the XDP layer
  *              for kernel netstack bypass. fastSwan is an XFRM offload feature.
  *
@@ -18,20 +18,9 @@
  *              either version 3.0 of the License, or (at your option) any later
  *              version.
  *
- * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
 #pragma once
 
-#include <syslog.h>
-
-#include "thread.h"
-#include "fswan_data.h"
-
-/* global var */
-struct thread_master *master = NULL;				/* Scheduling master thread */
-char *conf_file = NULL;						/* Configuration file */
-int log_facility = LOG_DAEMON;					/* Optional logging facilities */
-struct data *daemon_data = NULL;				/* Daemon Control Block data */
-char *default_conf_file = "/etc/fastswan/fastswan.conf";	/* Default configuration file */
-char *vty_shell_file = NULL;					/* VTY Shell file */
-char *default_vty_shell_file = "/var/run/fastswan.sock";	/* Default VTY Shell file */
+/* Prototypes */
+extern int fswan_vtysh(const char *path);
