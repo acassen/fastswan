@@ -1,0 +1,21 @@
+Source: fastswan
+Maintainer: Alexandre Cassen <acassen@gmail.com>
+Section: libs
+Priority: optional
+Build-Depends: debhelper-compat (= 13), debhelper (>= 13), libelf-dev, clang, llvm, meson, libbpf-dev, pkg-config
+Standards-Version: 3.8.0
+
+Package: fastswan
+Architecture: any
+Section: net
+Priority: optional
+Depends: ${shlibs:Depends}
+Description: fastSwan: XFRM offload data-path for the Linux Kernel
+ fastSwan provides a fast data-path for the Linux Kernel XFRM layer. Some NIC
+ vendors offer IPsec acceleration via a Crypto mode or a Packet mode. In
+ Packet mode, all IPsec ESP operations are done by the hardware to offload
+ the kernel for crypto and packet handling. To further increase performance,
+ fastSwan implements kernel routing offload via XDP. A XFRM kernel netlink
+ reflector dynamically and transparently mirrors kernel XFRM policies to the
+ XDP layer for kernel netstack bypass. Administration and user-level interface
+ are available via a standard VTY terminal interface.

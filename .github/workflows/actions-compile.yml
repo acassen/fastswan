@@ -1,0 +1,40 @@
+name: fastSwan CI
+run-name: ${{ github.actor }} basic compilation and basic tests ⚗️
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - '**'
+jobs:
+  build-fastswan:
+    name: Build fastswan
+    runs-on: ${{ matrix.os }}
+    permissions:
+      packages: read
+      actions: read
+      contents: read
+    strategy:
+      matrix:
+        os: [ ubuntu-latest ]
+        arch: [x86_64, arm64]
+        compiler: [ gcc, clang ]
+    steps:
+      - name: add missing packages
+        uses: ConorMacBride/install-package@v1
+        with:
+          apt: libelf-dev llvm meson
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: make fastswan
+        run : CC=${{ matrix.compiler }} make
+      - name: basic run
+        run : bin/fastswan --version
+      - name: Upload fastswan artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name : artifact-fastswan-${{ matrix.compiler }}-${{ matrix.arch }}
+          path : |
+            bin/fastswan
+            bin/*.bpf

@@ -1,0 +1,25 @@
+name: fastSwan Debian Package
+
+# Only run this workflow when the push is an annotated tag starting v
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-debs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jtdor/build-deb-action@v1
+        with:
+          buildpackage-opts: --build=binary --no-sign
+          docker-image: ubuntu:latest
+          before-build-hook: debchange -M -U -v "$(cat VERSION)" -D noble "CI package build"
+          extra-build-deps: ca-certificates git devscripts
+      - name: Upload fastswan artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name : fastswan-package
+          path : |
+            debian/artifacts/*.deb

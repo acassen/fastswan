@@ -1,0 +1,12 @@
+[Unit]
+Description=fastSwan: XFRM offload data-path for the Linux Kernel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+LimitCORE=infinity
+ExecStart=/usr/sbin/fastswan -n -d
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
