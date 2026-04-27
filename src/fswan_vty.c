@@ -25,10 +25,10 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <net/if.h>
-#include <errno.h>
 
 /* local includes */
-#include "fastswan.h"
+#include "fswan_vty.h"
+#include "fswan_bpf_vty.h"
 
 
 /*

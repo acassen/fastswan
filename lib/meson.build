@@ -3,8 +3,6 @@
 lib_src = files(
   'addr.c',
   'cpu.c',
-  'asn1_decoder.c',
-  'asn1_encoder.c',
   'ethtool.c',
   'buffer.c',
   'command.c',
@@ -12,9 +10,6 @@ lib_src = files(
   'disk.c',
   'inet_server.c',
   'inet_utils.c',
-  'id_pool.c',
-  'ip_pool.c',
-  'lease_pool.c',
   'json_reader.c',
   'json_writer.c',
   'list_head.c',

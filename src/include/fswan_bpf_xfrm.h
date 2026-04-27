@@ -20,10 +20,13 @@
  *
  * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
  */
+#pragma once
 
-#ifndef _FSWAN_BPF_XFRM_H
-#define _FSWAN_BPF_XFRM_H
+#include <linux/types.h>
 
+#include "vty.h"
+#include "fswan_bpf.h"
+#include "fswan_netlink.h"
 
 /* MAP Entries*/
 enum {
@@ -77,11 +80,9 @@ struct xfrm_offload_stats {
 
 
 /* Prototypes */
-extern int fswan_xfrm_policy_vty(vty_t *);
-extern int fswan_xfrm_policy_stats_vty(vty_t *);
-extern int fswan_xfrm_stats_vty(vty_t *);
-extern int fswan_bpf_xfrm_stats_init(fswan_bpf_opts_t *);
-extern int fswan_bpf_xfrm_load(fswan_bpf_opts_t *);
-extern int fswan_bpf_xfrm_action(int, xfrm_policy_t *);
-
-#endif
+extern int fswan_xfrm_policy_vty(struct vty *);
+extern int fswan_xfrm_policy_stats_vty(struct vty *);
+extern int fswan_xfrm_stats_vty(struct vty *);
+extern int fswan_bpf_xfrm_stats_init(struct fswan_bpf_opts *);
+extern int fswan_bpf_xfrm_load(struct fswan_bpf_opts *);
+extern int fswan_bpf_xfrm_action(int, struct xfrm_policy *);

@@ -20,11 +20,14 @@
  *
  * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
  */
+#pragma once
 
-#ifndef _FSWAN_IF_H
-#define _FSWAN_IF_H
-
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <net/if.h>
+
+#include "list_head.h"
 
 /* Defines */
 #define IF_DEFAULT_CONNECTION_KEEPIDLE		20
@@ -32,18 +35,18 @@
 #define IF_DEFAULT_CONNECTION_KEEPINTVL		10
 
 /* Types */
-typedef struct _interface {
-	char		ifname[IF_NAMESIZE];
-	int		ifindex;
+struct interface {
+	char			ifname[IF_NAMESIZE];
+	int			ifindex;
 
 	/* statistics */
-	uint64_t	rx_pkts;
-	uint64_t	rx_bytes;
-	uint64_t	tx_pkts;
-	uint64_t	tx_bytes;
+	uint64_t		rx_pkts;
+	uint64_t		rx_bytes;
+	uint64_t		tx_pkts;
+	uint64_t		tx_bytes;
 
-	list_head_t	next;
-} interface_t;
+	struct list_head	next;
+};
 
 
 /* Prototypes */
@@ -67,5 +70,3 @@ extern int if_setsockopt_rcvbuf(int *, int);
 extern int if_setsockopt_bindtodevice(int *, const char *);
 extern int if_setsockopt_priority(int *, int);
 extern int if_nametohwaddr(const char *, unsigned char *, size_t);
-
-#endif

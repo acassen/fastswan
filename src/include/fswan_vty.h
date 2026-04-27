@@ -20,9 +20,7 @@
  *
  * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
  */
-
-#ifndef _FSWAN_VTY_H
-#define _FSWAN_VTY_H
+#pragma once
 
 /* STR(MACRO) stringifies MACRO */
 #define _STR(x) #x
@@ -30,6 +28,3 @@
 
 /* Prototypes */
 extern int fswan_vty_init(void);
-
-
-#endif

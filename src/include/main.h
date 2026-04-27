@@ -20,15 +20,16 @@
  *
  * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
  */
+#pragma once
 
-#ifndef _MAIN_H
-#define _MAIN_H
+#include <syslog.h>
+
+#include "thread.h"
+#include "fswan_data.h"
 
 /* global var */
-thread_master_t *master = NULL;					/* Scheduling master thread */
+struct thread_master *master = NULL;				/* Scheduling master thread */
 char *conf_file = NULL;						/* Configuration file */
 int log_facility = LOG_DAEMON;					/* Optional logging facilities */
-data_t *daemon_data = NULL;					/* Daemon Control Block data */
+struct data *daemon_data = NULL;				/* Daemon Control Block data */
 char *default_conf_file = "/etc/fastswan/fastswan.conf";	/* Default configuration file */
-
-#endif

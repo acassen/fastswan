@@ -27,20 +27,23 @@
 #include <net/if.h>
 
 /* local includes */
-#include "fastswan.h"
+#include "memory.h"
+#include "fswan_data.h"
+#include "fswan_bpf.h"
+#include "fswan_netlink.h"
 
 
 /* Extern data */
-extern data_t *daemon_data;
+extern struct data *daemon_data;
 
 
 /*
  *	Daemon Control Block helpers
  */
-data_t *
+struct data *
 alloc_daemon_data(void)
 {
-	data_t *new;
+	struct data *new;
 
 	fswan_bpf_init();
 

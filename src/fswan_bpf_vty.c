@@ -25,19 +25,28 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <net/if.h>
-#include <errno.h>
 
 /* local includes */
-#include "fastswan.h"
+#include "memory.h"
+#include "bitops.h"
+#include "list_head.h"
+#include "thread.h"
+#include "vty.h"
+#include "command.h"
+#include "fswan_data.h"
+#include "fswan_bpf.h"
+#include "fswan_bpf_vty.h"
+#include "fswan_bpf_xfrm.h"
+#include "fswan_netlink.h"
 
 
 /* Extern data */
-extern data_t *daemon_data;
-extern thread_master_t *master;
+extern struct data *daemon_data;
+extern struct thread_master *master;
 
-static int bpf_config_write(vty_t *vty);
-cmd_node_t bpf_node = {
-        .node = BPF_NODE,
+static int bpf_config_write(struct vty *vty);
+struct cmd_node bpf_node = {
+        .node = BPF_PROG_NODE,
         .parent_node = CONFIG_NODE,
         .prompt = "%s(bpf)# ",
         .config_write = bpf_config_write,
@@ -52,7 +61,7 @@ DEFUN(bpf,
       "bpf",
       "Configure BPF progs\n")
 {
-	vty->node = BPF_NODE;
+	vty->node = BPF_PROG_NODE;
 	return CMD_SUCCESS;
 }
 
@@ -68,8 +77,8 @@ DEFUN(bpf_xdp_xfrm,
       "BPF Program Name\n"
       "Name\n")
 {
-	list_head_t *l = &daemon_data->bpf_progs;
-	fswan_bpf_opts_t *opts;
+	struct list_head *l = &daemon_data->bpf_progs;
+	struct fswan_bpf_opts *opts;
 	int err = 0;
 
 	if (fswan_bpf_opts_exist(l, argc, argv)) {
@@ -102,8 +111,8 @@ DEFUN(no_bpf_xdp_xfrm,
       "interface to attach to\n"
       "interface name\n")
 {
-	list_head_t *l = &daemon_data->bpf_progs;
-	fswan_bpf_opts_t *opts;
+	struct list_head *l = &daemon_data->bpf_progs;
+	struct fswan_bpf_opts *opts;
 
 	if (argc < 2) {
 		vty_out(vty, "%% missing arguments%s", VTY_NEWLINE);
@@ -314,7 +323,7 @@ DEFUN(show_xdp_xfrm_offload_stats,
 
 /* Configuration writer */
 static int
-fswan_bpf_opts_config_write(vty_t *vty, fswan_bpf_opts_t *opts)
+fswan_bpf_opts_config_write(struct vty *vty, struct fswan_bpf_opts *opts)
 {
 	char ifname[IF_NAMESIZE];
 
@@ -337,9 +346,9 @@ fswan_bpf_opts_config_write(vty_t *vty, fswan_bpf_opts_t *opts)
 }
 
 static int
-bpf_config_write(vty_t *vty)
+bpf_config_write(struct vty *vty)
 {
-	fswan_bpf_opts_t *opts;
+	struct fswan_bpf_opts *opts;
 
 	if (list_empty(&daemon_data->bpf_progs))
 		return CMD_SUCCESS;
@@ -372,9 +381,9 @@ fswan_bpf_vty_init(void)
 	install_node(&bpf_node);
 	install_element(CONFIG_NODE, &bpf_cmd);
 
-	install_default(BPF_NODE);
-	install_element(BPF_NODE, &bpf_xdp_xfrm_cmd);
-	install_element(BPF_NODE, &no_bpf_xdp_xfrm_cmd);
+	install_default(BPF_PROG_NODE);
+	install_element(BPF_PROG_NODE, &bpf_xdp_xfrm_cmd);
+	install_element(BPF_PROG_NODE, &no_bpf_xdp_xfrm_cmd);
 
 	/* Install global configuration commands */
 	install_element(CONFIG_NODE, &load_existing_xfrm_policy_cmd);

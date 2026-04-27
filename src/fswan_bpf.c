@@ -34,20 +34,26 @@
 #include <libbpf.h>
 
 /* local includes */
-#include "fastswan.h"
+#include "memory.h"
+#include "logger.h"
+#include "utils.h"
+#include "list_head.h"
+#include "vty.h"
+#include "fswan_data.h"
+#include "fswan_bpf.h"
 
 /* Local data */
 static const char *pin_basedir = "/sys/fs/bpf";
 
 
 /* Extern data */
-extern data_t *daemon_data;
+extern struct data *daemon_data;
 
 /*
  *	BPF MAP related
  */
 int
-fswan_bpf_map_load(fswan_bpf_opts_t *opts, const char *map_str, int map_idx)
+fswan_bpf_map_load(struct fswan_bpf_opts *opts, const char *map_str, int map_idx)
 {
 	struct bpf_map *map;
 
@@ -67,7 +73,7 @@ fswan_bpf_map_load(fswan_bpf_opts_t *opts, const char *map_str, int map_idx)
 }
 
 int
-fswan_bpf_map_unload(fswan_bpf_opts_t *opts)
+fswan_bpf_map_unload(struct fswan_bpf_opts *opts)
 {
 	if (opts->bpf_maps)
 		FREE(opts->bpf_maps);
@@ -77,10 +83,10 @@ fswan_bpf_map_unload(fswan_bpf_opts_t *opts)
 /*
  *	BPF opts related
  */
-fswan_bpf_opts_t *
-fswan_bpf_opts_alloc(int type, void (*bpf_unload) (fswan_bpf_opts_t *))
+struct fswan_bpf_opts *
+fswan_bpf_opts_alloc(int type, void (*bpf_unload) (struct fswan_bpf_opts *))
 {
-	fswan_bpf_opts_t *new;
+	struct fswan_bpf_opts *new;
 
 	PMALLOC(new);
 	INIT_LIST_HEAD(&new->next);
@@ -91,14 +97,14 @@ fswan_bpf_opts_alloc(int type, void (*bpf_unload) (fswan_bpf_opts_t *))
 }
 
 int
-fswan_bpf_opts_add(fswan_bpf_opts_t *opts, list_head_t *l)
+fswan_bpf_opts_add(struct fswan_bpf_opts *opts, struct list_head *l)
 {
 	list_add_tail(&opts->next, l);
 	return 0;
 }
 
 int
-fswan_bpf_opts_del(fswan_bpf_opts_t *opts)
+fswan_bpf_opts_del(struct fswan_bpf_opts *opts)
 {
 	if (opts->bpf_unload)
 		(*opts->bpf_unload) (opts);
@@ -108,10 +114,10 @@ fswan_bpf_opts_del(fswan_bpf_opts_t *opts)
 	return 0;
 }
 
-fswan_bpf_opts_t *
-fswan_bpf_opts_exist(list_head_t *l, int argc, const char **argv)
+struct fswan_bpf_opts *
+fswan_bpf_opts_exist(struct list_head *l, int argc, const char **argv)
 {
-	fswan_bpf_opts_t *opts;
+	struct fswan_bpf_opts *opts;
 	int ifindex;
 
 	if (argc < 2)
@@ -130,10 +136,10 @@ fswan_bpf_opts_exist(list_head_t *l, int argc, const char **argv)
 	return NULL;
 }
 
-fswan_bpf_opts_t *
-fswan_bpf_opts_get_by_label(list_head_t *l, const char *label)
+struct fswan_bpf_opts *
+fswan_bpf_opts_get_by_label(struct list_head *l, const char *label)
 {
-	fswan_bpf_opts_t *opts;
+	struct fswan_bpf_opts *opts;
 
 	list_for_each_entry(opts, l, next) {
 		if (!strncmp(opts->label, label, FSWAN_STR_MAX_LEN)) {
@@ -145,9 +151,9 @@ fswan_bpf_opts_get_by_label(list_head_t *l, const char *label)
 }
 
 void
-fswan_bpf_opts_destroy(list_head_t *l)
+fswan_bpf_opts_destroy(struct list_head *l)
 {
-	fswan_bpf_opts_t *opts, *_opts;
+	struct fswan_bpf_opts *opts, *_opts;
 
 	list_for_each_entry_safe(opts, _opts, l, next)
 		fswan_bpf_opts_del(opts);
@@ -155,8 +161,8 @@ fswan_bpf_opts_destroy(list_head_t *l)
 }
 
 int
-fswan_bpf_opts_load(fswan_bpf_opts_t *opts, vty_t *vty, int argc, const char **argv,
-		    int (*bpf_load) (fswan_bpf_opts_t *))
+fswan_bpf_opts_load(struct fswan_bpf_opts *opts, struct vty *vty, int argc, const char **argv,
+		    int (*bpf_load) (struct fswan_bpf_opts *))
 {
 	int err, ifindex;
 
@@ -186,7 +192,7 @@ fswan_bpf_opts_load(fswan_bpf_opts_t *opts, vty_t *vty, int argc, const char **a
 			   , opts->ifindex
 			   , VTY_NEWLINE);
 		/* Reset data */
-		memset(opts, 0, sizeof(fswan_bpf_opts_t));
+		memset(opts, 0, sizeof(struct fswan_bpf_opts));
 		return -1;
 	}
 
@@ -230,11 +236,11 @@ fswan_bpf_load_map(struct bpf_object *obj, const char *map_name)
 }
 
 static void
-fswan_bpf_cleanup_maps(struct bpf_object *obj, fswan_bpf_opts_t *opts)
+fswan_bpf_cleanup_maps(struct bpf_object *obj, struct fswan_bpf_opts *opts)
 {
 	char errmsg[FSWAN_XDP_STRERR_BUFSIZE];
 	struct bpf_map *map;
-	vty_t *vty = opts->vty;
+	struct vty *vty = opts->vty;
 
 	bpf_object__for_each_map(map, obj) {
 		char buf[FSWAN_STR_MAX_LEN];
@@ -271,11 +277,11 @@ fswan_bpf_cleanup_maps(struct bpf_object *obj, fswan_bpf_opts_t *opts)
 }
 
 static struct bpf_object *
-fswan_bpf_load_file(fswan_bpf_opts_t *opts)
+fswan_bpf_load_file(struct fswan_bpf_opts *opts)
 {
 	struct bpf_object *bpf_obj;
 	char errmsg[FSWAN_XDP_STRERR_BUFSIZE];
-	vty_t *vty = opts->vty;
+	struct vty *vty = opts->vty;
 	int err;
 
 	/* open eBPF file */
@@ -309,7 +315,7 @@ fswan_bpf_load_file(fswan_bpf_opts_t *opts)
 }
 
 static struct bpf_program *
-fswan_bpf_load_prog(fswan_bpf_opts_t *opts)
+fswan_bpf_load_prog(struct fswan_bpf_opts *opts)
 {
 	struct bpf_program *bpf_prog = NULL;
 	struct bpf_object *bpf_obj;
@@ -369,7 +375,7 @@ fswan_bpf_load_prog(fswan_bpf_opts_t *opts)
 
 
 int
-fswan_xdp_load(fswan_bpf_opts_t *opts)
+fswan_xdp_load(struct fswan_bpf_opts *opts)
 {
 	struct bpf_program *bpf_prog = NULL;
 	struct bpf_link *bpf_lnk;
@@ -410,7 +416,7 @@ fswan_xdp_load(fswan_bpf_opts_t *opts)
 }
 
 void
-fswan_xdp_unload(fswan_bpf_opts_t *opts)
+fswan_xdp_unload(struct fswan_bpf_opts *opts)
 {
 	bpf_link__destroy(opts->bpf_lnk);
 	bpf_object__close(opts->bpf_obj);

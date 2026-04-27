@@ -20,11 +20,7 @@
  *
  * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
  */
-
-#ifndef _FSWAN_BPF_VTY_H
-#define _FSWAN_BPF_VTY_H
+#pragma once
 
 /* Prototypes */
 extern int fswan_bpf_vty_init(void);
-
-#endif

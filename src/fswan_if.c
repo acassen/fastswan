@@ -23,18 +23,22 @@
 
 /* global includes */
 #include <unistd.h>
+#include <string.h>
 #include <errno.h>
 #include <syslog.h>
 #include <sys/ioctl.h>
 #include <sys/time.h>
 #include <net/if.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
 #include <netinet/tcp.h>
 #include <linux/filter.h>
-#include <linux/ip.h>
 #include <linux/if_packet.h>
 
 /* local includes */
-#include "fastswan.h"
+#include "logger.h"
+#include "utils.h"
+#include "fswan_if.h"
 
 
 /* Set Reuse addr option */
@@ -505,7 +509,7 @@ if_nametohwaddr(const char *ifname, unsigned char *hwaddr, size_t hwsize)
         fd = socket(AF_INET, SOCK_DGRAM, 0);
         if (fd < 0)
                 return -1;
-        strlcpy(ifr.ifr_name, ifname, IFNAMSIZ);
+        bsd_strlcpy(ifr.ifr_name, ifname, IFNAMSIZ);
         ioctl(fd, SIOCGIFHWADDR, &ifr);
         memcpy(hwaddr, ifr.ifr_hwaddr.sa_data, hwsize);
         close(fd);

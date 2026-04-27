@@ -23,15 +23,28 @@
 
 /* global includes */
 #include <getopt.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <syslog.h>
-#include <time.h>
+#include <unistd.h>
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <libbpf.h>
 
 /* local includes */
-#include "fastswan.h"
 #include "config.h"
+#include "bitops.h"
+#include "daemon.h"
+#include "logger.h"
+#include "memory.h"
+#include "pidfile.h"
+#include "signals.h"
+#include "thread.h"
+#include "utils.h"
+#include "command.h"
+#include "fswan_data.h"
+#include "fswan_netlink.h"
+#include "fswan_vty.h"
 #include "main.h"
 
 

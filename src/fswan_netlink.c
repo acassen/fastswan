@@ -22,7 +22,9 @@
  */
 
 /* system includes */
+#include <stdarg.h>
 #include <unistd.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <arpa/inet.h>
@@ -34,15 +36,23 @@
 #include <errno.h>
 
 /* local includes */
-#include "fastswan.h"
+#include "memory.h"
+#include "logger.h"
+#include "bitops.h"
+#include "utils.h"
+#include "thread.h"
+#include "fswan_data.h"
+#include "fswan_if.h"
+#include "fswan_netlink.h"
+#include "fswan_bpf_xfrm.h"
 
 /* Local data */
-static nl_handle_t nl_kernel = { .fd = -1 };	/* Kernel reflection channel */
-static nl_handle_t nl_cmd = { .fd = -1 };	/* Kernel command channel */
+static struct nl_handle nl_kernel = { .fd = -1 };	/* Kernel reflection channel */
+static struct nl_handle nl_cmd = { .fd = -1 };	/* Kernel command channel */
 
 /* Extern data */
-extern data_t *daemon_data;
-extern thread_master_t *master;
+extern struct data *daemon_data;
+extern struct thread_master *master;
 
 /* Ok this is a nasty hack but PACKET OFFLOAD is not part of all distros.
  * otherwise need to maintain a uapi copy like iproute2 does */
@@ -114,7 +124,7 @@ parse_rtattr(struct rtattr **tb, int max, struct rtattr *rta, size_t len)
 /* Parse Netlink message */
 static int
 netlink_parse_info(int (*filter) (struct sockaddr_nl *, struct nlmsghdr *),
-		   nl_handle_t *nl, struct nlmsghdr *n, bool read_all)
+		   struct nl_handle *nl, struct nlmsghdr *n, bool read_all)
 {
 	ssize_t len;
 	int ret = 0;
@@ -271,7 +281,7 @@ netlink_parse_info(int (*filter) (struct sockaddr_nl *, struct nlmsghdr *),
 
 /* Open Netlink channel with kernel */
 static int
-netlink_open(nl_handle_t *nl, unsigned rcvbuf_size, int flags, int protocol, unsigned group, ...)
+netlink_open(struct nl_handle *nl, unsigned rcvbuf_size, int flags, int protocol, unsigned group, ...)
 {
 	socklen_t addr_len;
 	struct sockaddr_nl snl;
@@ -339,13 +349,13 @@ netlink_open(nl_handle_t *nl, unsigned rcvbuf_size, int flags, int protocol, uns
 
 /* Close Netlink channel with kernel */
 static void
-netlink_close(nl_handle_t *nl)
+netlink_close(struct nl_handle *nl)
 {
 	if (!nl)
 		return;
 
 	if (nl->thread) {
-		thread_cancel(nl->thread);
+		thread_del(nl->thread);
 		nl->thread = NULL;
 	}
 
@@ -371,7 +381,7 @@ xfrm_policy_filter(struct nlmsghdr *n)
 	struct xfrm_userpolicy_id *xpid = NULL;
 	struct xfrm_selector *sel;
 	struct xfrm_user_offload *xuo;
-	xfrm_policy_t policy;
+	struct xfrm_policy policy;
 	int len = n->nlmsg_len;
 
 	if (n->nlmsg_type == XFRM_MSG_DELPOLICY)  {
@@ -446,7 +456,7 @@ xfrm_policy_filter(struct nlmsghdr *n)
 		return 0;
 
 	/* Cherry pick */
-	memset(&policy, 0, sizeof(xfrm_policy_t));
+	memset(&policy, 0, sizeof(struct xfrm_policy));
 	policy.family = sel->family;
 	policy.daddr = sel->daddr;
 	policy.saddr = sel->saddr;
@@ -490,9 +500,9 @@ netlink_xfrm_filter(struct sockaddr_nl *snl, struct nlmsghdr *h)
  *	Kernel Netlink reflector
  */
 static void
-kernel_netlink(thread_ref_t thread)
+kernel_netlink(struct thread * thread)
 {
-	nl_handle_t *nl = THREAD_ARG(thread);
+	struct nl_handle *nl = THREAD_ARG(thread);
 
 	if (thread->type != THREAD_READ_TIMEOUT)
 		netlink_parse_info(netlink_xfrm_filter, nl, NULL, true);
@@ -505,7 +515,7 @@ kernel_netlink(thread_ref_t thread)
  *	Netlink XFRM lookup
  */
 static int
-netlink_xfrm_request(nl_handle_t *nl, uint16_t type)
+netlink_xfrm_request(struct nl_handle *nl, uint16_t type)
 {
 	ssize_t status;
 	struct sockaddr_nl snl = { .nl_family = AF_NETLINK };
@@ -557,7 +567,7 @@ netlink_xfrm_lookup(void)
  *	Netlink Interface lookup
  */
 static int
-netlink_if_request(nl_handle_t *nl, unsigned char family, uint16_t type)
+netlink_if_request(struct nl_handle *nl, unsigned char family, uint16_t type)
 {
 	ssize_t status;
 	struct sockaddr_nl snl = { .nl_family = AF_NETLINK };
@@ -592,7 +602,7 @@ netlink_if_link_filter(__attribute__((unused)) struct sockaddr_nl *snl, struct n
 {
 	struct ifinfomsg *ifi;
 	struct rtattr *tb[IFLA_MAX + 1];
-	interface_t *new;
+	struct interface *new;
 	char *name;
 	size_t len;
 
@@ -677,7 +687,7 @@ fswan_netlink_init(void)
 int
 fswan_netlink_destroy(void)
 {
-	interface_t *ifi, *ifi_tmp;
+	struct interface *ifi, *ifi_tmp;
 
 	list_for_each_entry_safe(ifi, ifi_tmp, &daemon_data->interfaces, next)
 		FREE(ifi);

@@ -20,9 +20,7 @@
  *
  * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
-
-#ifndef _PCI_H
-#define _PCI_H
+#pragma once
 
 #include "vty.h"
 
@@ -43,4 +41,3 @@ struct pci_eth_dev {
 int pci_eth_dev_fetch(struct pci_eth_dev *devs, int max_devs);
 void pci_eth_dev_vty(struct vty *vty, struct pci_eth_dev *devs, int ndevs);
 
-#endif

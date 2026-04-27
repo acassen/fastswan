@@ -20,9 +20,9 @@
  *
  * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
  */
+#pragma once
 
-#ifndef _FSWAN_DATA_H
-#define _FSWAN_DATA_H
+#include "list_head.h"
 
 /* Default values */
 #define FSWAN_STR_MAX_LEN	128
@@ -39,16 +39,14 @@ enum daemon_flags {
 };
 
 /* Main control block */
-typedef struct _data {
-	list_head_t		bpf_progs;
-	list_head_t		interfaces;
+struct data {
+	struct list_head	bpf_progs;
+	struct list_head	interfaces;
 	unsigned		nl_rcvbuf_size;
 
 	unsigned long		flags;
-} data_t;
+};
 
 /* Prototypes */
-extern data_t *alloc_daemon_data(void);
+extern struct data *alloc_daemon_data(void);
 extern void free_daemon_data(void);
-
-#endif

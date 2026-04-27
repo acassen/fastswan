@@ -20,27 +20,28 @@
  *
  * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
  */
+#pragma once
 
-#ifndef _FSWAN_NETLINK_H
-#define _FSWAN_NETLINK_H
-
+#include <stdint.h>
 #include <linux/netlink.h>
 #include <linux/xfrm.h>
 
+#include "thread.h"
+
 /* types definitions */
-typedef struct _nl_handle {
+struct nl_handle {
 	int			fd;
 	uint32_t		nl_pid;
 	__u32			seq;
-	thread_ref_t		thread;
-} nl_handle_t;
+	struct thread		*thread;
+};
 
 enum xfrm_policy_flags {
 	XFRM_POLICY_FL_IN_BIT,
 	XFRM_POLICY_FL_OUT_BIT,
 };
 
-typedef struct _xfrm_policy {
+struct xfrm_policy {
 	xfrm_address_t		daddr;
 	xfrm_address_t		saddr;
 	__u16			family;
@@ -49,7 +50,7 @@ typedef struct _xfrm_policy {
 	int			ifindex;
 
 	unsigned long		flags;
-} xfrm_policy_t;
+};
 
 
 /* Defines */
@@ -83,5 +84,3 @@ typedef struct _xfrm_policy {
 extern int netlink_xfrm_lookup(void);
 extern int fswan_netlink_init(void);
 extern int fswan_netlink_destroy(void);
-
-#endif
