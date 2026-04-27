@@ -35,7 +35,6 @@
 #include "command.h"
 #include "fswan_data.h"
 #include "fswan_bpf.h"
-#include "fswan_bpf_vty.h"
 #include "fswan_bpf_xfrm.h"
 #include "fswan_netlink.h"
 
@@ -43,14 +42,6 @@
 /* Extern data */
 extern struct data *daemon_data;
 extern struct thread_master *master;
-
-static int bpf_config_write(struct vty *vty);
-struct cmd_node bpf_node = {
-        .node = BPF_PROG_NODE,
-        .parent_node = CONFIG_NODE,
-        .prompt = "%s(bpf)# ",
-        .config_write = bpf_config_write,
-};
 
 
 /*
@@ -373,12 +364,10 @@ bpf_config_write(struct vty *vty)
 /*
  *	VTY init
  */
-int
-fswan_bpf_vty_init(void)
+static int
+cmd_ext_bpf_install(void)
 {
-
 	/* Install BPF commands. */
-	install_node(&bpf_node);
 	install_element(CONFIG_NODE, &bpf_cmd);
 
 	install_default(BPF_PROG_NODE);
@@ -401,4 +390,22 @@ fswan_bpf_vty_init(void)
 	install_element(ENABLE_NODE, &show_xdp_xfrm_offload_stats_cmd);
 
 	return 0;
+}
+
+static struct cmd_node bpf_node = {
+	.node		= BPF_PROG_NODE,
+	.parent_node	= CONFIG_NODE,
+	.prompt		= "%s(bpf)# ",
+	.config_write	= bpf_config_write,
+};
+
+static struct cmd_ext cmd_ext_bpf = {
+	.node		= &bpf_node,
+	.install	= cmd_ext_bpf_install,
+};
+
+static void __attribute__((constructor))
+fswan_bpf_vty_init(void)
+{
+	cmd_ext_register(&cmd_ext_bpf);
 }

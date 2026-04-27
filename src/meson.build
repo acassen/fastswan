@@ -30,7 +30,6 @@ src += files(
   'fswan_data.c',
   'fswan_if.c',
   'fswan_netlink.c',
-  'fswan_vty.c',
   'main.c',
 )
 

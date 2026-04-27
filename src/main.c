@@ -44,7 +44,6 @@
 #include "command.h"
 #include "fswan_data.h"
 #include "fswan_netlink.h"
-#include "fswan_vty.h"
 #include "main.h"
 
 
@@ -89,7 +88,6 @@ start_fswan(void)
 
 	cmd_init();
 	vty_init();
-	fswan_vty_init();
 	sort_node();
 	fswan_netlink_init();
 
