@@ -25,8 +25,6 @@
 #include <stdarg.h>
 #include <unistd.h>
 #include <time.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <linux/if_link.h>
@@ -41,6 +39,7 @@
 #include "bitops.h"
 #include "utils.h"
 #include "thread.h"
+#include "inet_utils.h"
 #include "fswan_data.h"
 #include "fswan_netlink.h"
 #include "fswan_bpf_xfrm.h"
@@ -271,9 +270,7 @@ netlink_parse_info(int (*filter) (struct sockaddr_nl *, struct nlmsghdr *),
 		}
 	}
 
-	if (nlmsg_buf)
-		FREE(nlmsg_buf);
-
+	FREE_PTR(nlmsg_buf);
 	return ret;
 }
 
@@ -339,11 +336,9 @@ netlink_open(struct nl_handle *nl, unsigned rcvbuf_size, int flags, int protocol
 	nl->nl_pid = snl.nl_pid;
 	nl->seq = (uint32_t)time(NULL);
 
-	err = setsockopt(nl->fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf_sz, sizeof(rcvbuf_size));
-	if (err)
-		log_message(LOG_INFO, "Cannot set SO_RCVBUF IP option. errno=%d (%m)", errno);
+	inet_setsockopt_rcvbuf(nl->fd, rcvbuf_sz);
 
-	return err;
+	return 0;
 }
 
 /* Close Netlink channel with kernel */
@@ -469,27 +464,17 @@ xfrm_policy_filter(struct nlmsghdr *n)
 }
 
 static int
-netlink_xfrm_filter(struct sockaddr_nl *snl, struct nlmsghdr *h)
+netlink_xfrm_filter(__attribute__((unused)) struct sockaddr_nl *snl, struct nlmsghdr *h)
 {
 	switch (h->nlmsg_type) {
-#if 0
-	case XFRM_MSG_NEWSA:
-	case XFRM_MSG_DELSA:
-	case XFRM_MSG_UPDSA:
-	case XFRM_MSG_EXPIRE:
-  		xfrm_state_handle(h);
-		return 0;
-#endif
 	case XFRM_MSG_NEWPOLICY:
 	case XFRM_MSG_DELPOLICY:
 	case XFRM_MSG_UPDPOLICY:
 	case XFRM_MSG_POLEXPIRE:
-		xfrm_policy_filter(h);
-		return 0;
+		return xfrm_policy_filter(h);
 	default:
 		log_message(LOG_INFO, "Kernel is reflecting an unknown netlink nlmsg_type: %d"
 				    , h->nlmsg_type);
-		break;
 	}
 	return 0;
 }
@@ -516,22 +501,16 @@ kernel_netlink(struct thread * thread)
 static int
 netlink_xfrm_request(struct nl_handle *nl, uint16_t type)
 {
-	ssize_t status;
 	struct sockaddr_nl snl = { .nl_family = AF_NETLINK };
-	struct {
-		struct nlmsghdr nlh;
-		char buf[4096];
-	} req = {
-		.nlh.nlmsg_len = NLMSG_HDRLEN,
-		.nlh.nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST,
-		.nlh.nlmsg_type = type,
-		.nlh.nlmsg_pid = 0,
-		.nlh.nlmsg_seq = ++nl->seq,
+	struct nlmsghdr nlh = {
+		.nlmsg_len = NLMSG_HDRLEN,
+		.nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST,
+		.nlmsg_type = type,
+		.nlmsg_seq = ++nl->seq,
 	};
 
-	status = sendto(nl->fd, (void *) &req, sizeof (req), 0
-			      , (struct sockaddr *) &snl, sizeof(snl));
-	if (status < 0) {
+	if (sendto(nl->fd, &nlh, sizeof(nlh), 0,
+		   (struct sockaddr *) &snl, sizeof(snl)) < 0) {
 		log_message(LOG_INFO, "Netlink: sendto() failed: %m");
 		return -1;
 	}
@@ -551,12 +530,10 @@ netlink_xfrm_lookup(void)
 		return -1;
 	}
 
-	if (netlink_xfrm_request(&nl_cmd, XFRM_MSG_GETPOLICY) < 0) {
+	if (netlink_xfrm_request(&nl_cmd, XFRM_MSG_GETPOLICY) < 0 ||
+	    netlink_parse_info(netlink_xfrm_filter, &nl_cmd, NULL, false) < 0)
 		err = -1;
-		goto end;
-	}
-	netlink_parse_info(netlink_xfrm_filter, &nl_cmd, NULL, false);
-  end:
+
 	netlink_close(&nl_cmd);
 	return err;
 }
@@ -571,12 +548,8 @@ fswan_netlink_init(void)
 	int err;
 
 	/* Register Kernel netlink reflector */
-	err = netlink_open(&nl_kernel, daemon_data->nl_rcvbuf_size, SOCK_NONBLOCK, NETLINK_XFRM
-				     , XFRMNLGRP_POLICY, 0);
-#if 0
-	/* Do we need SA broadcast too ??? dont think so... */
-				     , XFRMNLGRP_SA, XFRMNLGRP_POLICY, 0);
-#endif
+	err = netlink_open(&nl_kernel, daemon_data->nl_rcvbuf_size, SOCK_NONBLOCK
+				     , NETLINK_XFRM, XFRMNLGRP_POLICY, 0);
 	if (err) {
 		log_message(LOG_INFO, "Error while registering Kernel netlink reflector channel");
 		return -1;
