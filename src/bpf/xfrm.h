@@ -24,9 +24,6 @@
 #ifndef _XFRM_H
 #define _XFRM_H
 
-#define likely(x) __builtin_expect(!!(x), 1)
-#define unlikely(x) __builtin_expect(!!(x), 0)
-
 /* linux/if_vlan.h have not exposed this as UAPI, thus mirror some here
  *
  *      struct vlan_hdr - vlan header

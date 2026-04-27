@@ -18,47 +18,20 @@
 #              either version 3.0 of the License, or (at your option) any later
 #              version.
 #
-# Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
+# Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
 #
 
-EXEC = fastswan
-BIN  = bin
+subdir('bpf')
 
-BUILDDIR ?= build
-V ?= 0
-ifeq ($V,1)
-  ninja_opts = --verbose
-  Q =
-else
-  Q = @
-endif
+src += files(
+  'fswan_bpf.c',
+  'fswan_bpf_vty.c',
+  'fswan_bpf_xfrm.c',
+  'fswan_data.c',
+  'fswan_if.c',
+  'fswan_netlink.c',
+  'fswan_vty.c',
+  'main.c',
+)
 
-all: $(BUILDDIR)/build.ninja
-	$Q ninja -C $(BUILDDIR) $(ninja_opts)
-	$Q ln -f $(BUILDDIR)/$(EXEC) $(BIN)/$(EXEC)
-	$Q export BPFS=$(BUILDDIR)/src/bpf/*.bpf; \
-	for f in $$BPFS; do ln -f "$$f" $(BIN); done
-
-$(BUILDDIR)/build.ninja:
-	meson setup $(BUILDDIR) $(MESON_OPTS)
-
-clean: $(BUILDDIR)/build.ninja
-	$Q ninja -C $(BUILDDIR) clean $(ninja_opts)
-	$Q rm -f $(BIN)/*
-
-install: $(BUILDDIR)/build.ninja
-	$Q meson install -C $(BUILDDIR)
-
-uninstall: $(BUILDDIR)/build.ninja
-	$Q ninja -C $(BUILDDIR) $(ninja_opts)
-
-test:
-	$Q meson test -C $(BUILDDIR) $(TEST)
-
-tarball: $(BUILDDIR)/build.ninja
-	$Q meson dist -C $(BUILDDIR) --no-test --allow-dirty >/dev/null
-	$Q export TAR=$(BUILDDIR)/meson-dist/*.xz; \
-	cp "$$TAR" .; \
-	echo `basename "$$TAR"`
-
-.PHONY: all clean install uninstall tarball test
+inc += include_directories('include')

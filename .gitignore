@@ -3,3 +3,8 @@
 bin/fastswan
 *.bpf
 *.ll
+
+# meson build & wrap
+/builddir/
+/build/
+/subprojects/libbpf/
