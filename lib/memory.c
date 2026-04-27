@@ -6,7 +6,7 @@
  *              mode, all IPSEC ESP operations are done by the hardware to
  *              offload the kernel for crypto and packet handling. To further
  *              increase perfs we implement kernel routing offload via XDP.
- *              A XFRM kernel netlink reflector is dynamically andi
+ *              A XFRM kernel netlink reflector is dynamically and
  *              transparently mirroring kernel XFRM policies to the XDP layer
  *              for kernel netstack bypass. fastSwan is an XFRM offload feature.
  *
@@ -18,11 +18,12 @@
  *              either version 3.0 of the License, or (at your option) any later
  *              version.
  *
- * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
 
-#include "memory.h"
-#include "utils.h"
+#include <stdlib.h>
+#include <string.h>
+#include <assert.h>
 
 /* Global var */
 unsigned long mem_allocated = 0;	/* Total memory used in Bytes */
@@ -84,7 +85,6 @@ xfree(void *p)
  */
 
 #ifdef _DEBUG_
-extern void dump_buffer(char *, int);
 
 typedef struct {
 	int type;
@@ -195,12 +195,11 @@ memory_free(void *buffer, char *file, const char *function, const int line)
 					     nspace(--s), i, number_alloc_list,
 					     buf, alloc_list[i].size, file,
 					     line, function);
-					dump_buffer(alloc_list[i].ptr,
-						    alloc_list[i].size +
-						     sizeof (long));
+					hexdump("", alloc_list[i].ptr
+						  , alloc_list[i].size + sizeof (long));
 					printf("%sCheck_sum\n", nspace(i));
-					dump_buffer((char *) &alloc_list[i].csum,
-						    sizeof(long));
+					hexdump("", (char *) &alloc_list[i].csum
+						  , sizeof(long));
 
 					debug |= 512;	/* Memory Error detect */
 				}

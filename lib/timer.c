@@ -6,7 +6,7 @@
  *              mode, all IPSEC ESP operations are done by the hardware to
  *              offload the kernel for crypto and packet handling. To further
  *              increase perfs we implement kernel routing offload via XDP.
- *              A XFRM kernel netlink reflector is dynamically andi
+ *              A XFRM kernel netlink reflector is dynamically and
  *              transparently mirroring kernel XFRM policies to the XDP layer
  *              for kernel netstack bypass. fastSwan is an XFRM offload feature.
  *
@@ -18,45 +18,32 @@
  *              either version 3.0 of the License, or (at your option) any later
  *              version.
  *
- * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
 
-#include "config.h"
-
-#include <string.h>
 #include <errno.h>
-#include <sys/time.h>
 #include <sys/prctl.h>
 #include <time.h>
-#include <pthread.h>
-#include <stdbool.h>
 
+#include "memory.h"
 #include "utils.h"
 #include "bitops.h"
-#include "container.h"
-#include "rbtree_api.h"
 #include "timer.h"
 #include "timer_thread.h"
-#ifdef _TIMER_CHECK_
-#include "logger.h"
-#endif
+#include "timer_thread.h"
+#include "rbtree_api.h"
 
 /* time_now holds current time */
 timeval_t time_now;
-#ifdef _TIMER_CHECK_
-static timeval_t last_time;
-bool do_timer_check;
-#endif
 
 
 /*
  *	Timer related
  */
 timeval_t
-timer_add_long(timeval_t a, unsigned long b)
+timer_add_ll(timeval_t a, uint64_t b)
 {
-	if (b == TIMER_NEVER)
-	{
+	if (b == TIMER_NEVER) {
 		a.tv_usec = TIMER_HZ - 1;
 		a.tv_sec = TIMER_DISABLED;
 
@@ -75,7 +62,7 @@ timer_add_long(timeval_t a, unsigned long b)
 }
 
 timeval_t
-timer_sub_long(timeval_t a, unsigned long b)
+timer_sub_ll(timeval_t a, uint64_t b)
 {
 	if (a.tv_usec < (suseconds_t)(b % TIMER_HZ)) {
 		a.tv_usec += TIMER_HZ;
@@ -138,7 +125,7 @@ set_mono_offset(struct timespec *ts)
  * It will normally return 0, unless <now> is NULL, in which case it will
  * return -1 and set errno to EFAULT.
  */
-static int
+int
 monotonic_gettimeofday(timeval_t *now)
 {
 	static struct timespec mono_offset;
@@ -222,6 +209,16 @@ time_now_to_calendar(struct tm *t)
 	return localtime_r(&time_now.tv_sec, t);
 }
 
+/* Convert time_now to ntp with epoch offset.
+ * RFC5905.6 : NTP Epoch is 1/1/1900-00:00h.
+ *  NTP Timestamp Era Offset per Figure 4:
+ *  (70*365 + 17)*86400 = 2208988800
+ */
+uint32_t
+time_now_to_ntp(void)
+{
+	return (uint32_t)time(NULL) + 2208988800;
+}
 
 /*
  *	Timer thread related
@@ -315,7 +312,7 @@ timer_thread_fired(timer_thread_t *t, timeval_t *now)
 	pthread_mutex_unlock(&t->timer_mutex);
 }
 
-static void
+void
 timespec_add_now_ms(struct timespec *t, timeval_t *now, unsigned long ms)
 {
 	t->tv_sec = now->tv_sec;
@@ -361,13 +358,26 @@ timer_thread_init(timer_thread_t *t, const char *name, int (*fired) (void *))
 {
 	t->timer = RB_ROOT_CACHED;
 	t->fired = fired;
-	strlcpy(t->name, name, TIMER_THREAD_NAMESIZ);
+	bsd_strlcpy(t->name, name, TIMER_THREAD_NAMESIZ);
 	pthread_mutex_init(&t->timer_mutex, NULL);
 	pthread_mutex_init(&t->cond_mutex, NULL);
 	pthread_cond_init(&t->cond, NULL);
 
 	pthread_create(&t->task, NULL, timer_thread_task, t);
 	return 0;
+}
+
+timer_thread_t *
+timer_thread_alloc(const char *name, int (*fired) (void *))
+{
+	timer_thread_t *new;
+
+	PMALLOC(new);
+	if (!new)
+		return NULL;
+	timer_thread_init(new, name, fired);
+
+	return new;
 }
 
 int
@@ -388,5 +398,13 @@ timer_thread_destroy(timer_thread_t *t)
 	pthread_mutex_destroy(&t->timer_mutex);
 	pthread_mutex_destroy(&t->cond_mutex);
 	pthread_cond_destroy(&t->cond);
+	return 0;
+}
+
+int
+timer_thread_free(timer_thread_t *t)
+{
+	timer_thread_destroy(t);
+	FREE(t);
 	return 0;
 }

@@ -6,7 +6,7 @@
  *              mode, all IPSEC ESP operations are done by the hardware to
  *              offload the kernel for crypto and packet handling. To further
  *              increase perfs we implement kernel routing offload via XDP.
- *              A XFRM kernel netlink reflector is dynamically andi
+ *              A XFRM kernel netlink reflector is dynamically and
  *              transparently mirroring kernel XFRM policies to the XDP layer
  *              for kernel netstack bypass. fastSwan is an XFRM offload feature.
  *
@@ -18,15 +18,10 @@
  *              either version 3.0 of the License, or (at your option) any later
  *              version.
  *
- * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
 
-#ifndef _CONTAINER_H
-#define _CONTAINER_H
-
-#include "warnings.h"
-#include "config.h"
-
+#pragma once
 
 #if defined _HAVE_FUNCTION_ATTRIBUTE_ERROR_ && (!defined _HAVE_WARNING_NESTED_EXTERNS_ || defined _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_)
 
@@ -92,6 +87,4 @@
 			"pointer type mismatch in container_of()");	\
 	const typeof( ((type *)0)->member ) *__mptr = (ptr);  		\
 	(type *)( (const char *)__mptr - offsetof(type,member) );})
-#endif
-
 #endif

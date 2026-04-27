@@ -6,7 +6,7 @@
  *              mode, all IPSEC ESP operations are done by the hardware to
  *              offload the kernel for crypto and packet handling. To further
  *              increase perfs we implement kernel routing offload via XDP.
- *              A XFRM kernel netlink reflector is dynamically andi
+ *              A XFRM kernel netlink reflector is dynamically and
  *              transparently mirroring kernel XFRM policies to the XDP layer
  *              for kernel netstack bypass. fastSwan is an XFRM offload feature.
  *
@@ -18,20 +18,22 @@
  *              either version 3.0 of the License, or (at your option) any later
  *              version.
  *
- * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
+#pragma once
 
-#ifndef _TIMER_THREAD_H
-#define _TIMER_THREAD_H
+#include <pthread.h>
+#include "rbtree_types.h"
+#include "timer.h"
 
 enum {
 	TIMER_THREAD_FL_STOP_BIT,
 };
 
 #define TIMER_THREAD_NAMESIZ	128
-typedef struct _timer_thread {
+typedef struct timer_thread {
 	char			name[TIMER_THREAD_NAMESIZ];
-	rb_root_cached_t	timer;
+	struct rb_root_cached	timer;
 	pthread_mutex_t		timer_mutex;
 	pthread_t		task;
 	pthread_cond_t		cond;
@@ -41,22 +43,22 @@ typedef struct _timer_thread {
 	unsigned long		flags;
 } timer_thread_t;
 
-typedef struct _timer_node {
+typedef struct timer_node {
 	int		(*to_func) (void *);
 	void		*to_arg;
 	timeval_t	sands;
-	rb_node_t	n;
+	struct rb_node	n;
 } timer_node_t;
 
 
 /* prototypes */
-extern void timer_node_expire_now(timer_thread_t *, timer_node_t *);
-extern void timer_node_init(timer_node_t *, int (*fn) (void *), void *);
-extern void timer_node_add(timer_thread_t *, timer_node_t *, int);
-extern int timer_node_pending(timer_node_t *);
-extern int timer_node_del(timer_thread_t *, timer_node_t *);
-extern int timer_thread_init(timer_thread_t *, const char *, int (*fired) (void *));
-extern int timer_thread_signal(timer_thread_t *);
-extern int timer_thread_destroy(timer_thread_t *);
-
-#endif
+void timer_node_expire_now(timer_thread_t *, timer_node_t *);
+void timer_node_init(timer_node_t *, int (*fn) (void *), void *);
+void timer_node_add(timer_thread_t *, timer_node_t *, int);
+int timer_node_pending(timer_node_t *);
+int timer_node_del(timer_thread_t *, timer_node_t *);
+int timer_thread_init(timer_thread_t *, const char *, int (*fired) (void *));
+timer_thread_t *timer_thread_alloc(const char *, int (*fired) (void *));
+int timer_thread_signal(timer_thread_t *);
+int timer_thread_destroy(timer_thread_t *);
+int timer_thread_free(timer_thread_t *);

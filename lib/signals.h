@@ -6,7 +6,7 @@
  *              mode, all IPSEC ESP operations are done by the hardware to
  *              offload the kernel for crypto and packet handling. To further
  *              increase perfs we implement kernel routing offload via XDP.
- *              A XFRM kernel netlink reflector is dynamically andi
+ *              A XFRM kernel netlink reflector is dynamically and
  *              transparently mirroring kernel XFRM policies to the XDP layer
  *              for kernel netstack bypass. fastSwan is an XFRM offload feature.
  *
@@ -18,18 +18,13 @@
  *              either version 3.0 of the License, or (at your option) any later
  *              version.
  *
- * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
-
-#ifndef _SIGNALS_H
-#define _SIGNALS_H
-
-#include "config.h"
+#pragma once
 
 #include <signal.h>
 #include <stdbool.h>
-
-#include "scheduler.h"
+#include "thread.h"
 
 #define SIGJSON 		(SIGRTMIN + 2)
 #ifdef THREAD_DUMP
@@ -50,20 +45,14 @@ sigmask_func(int how, const sigset_t *set, sigset_t *oldset)
 }
 
 /* Prototypes */
-extern int get_signum(const char *);
-extern void signal_set(int, void (*) (void *, int), void *);
-extern void signal_ignore(int);
-extern int signal_handler_init(void);
-extern void signal_handler_destroy(void);
-extern void signal_handler_script(void);
-extern void add_signal_read_thread(thread_master_t *);
-extern void cancel_signal_read_thread(void);
-extern void set_sigxcpu_handler(void);
-extern void signal_noignore_sigchld(void);
-extern void signal_noignore_sig(int);
-
-#ifdef THREAD_DUMP
-extern void register_signal_thread_addresses(void);
-#endif
-
-#endif
+int get_signum(const char *sigfunc);
+void signal_set(int signo, void (*func) (void *, int), void *v);
+void signal_ignore(int signo);
+int signal_handler_init(void);
+void signal_handler_destroy(void);
+void signal_handler_script(void);
+void add_signal_read_thread(struct thread_master *m);
+void cancel_signal_read_thread(void);
+void set_sigxcpu_handler(void);
+void signal_noignore_sigchld(void);
+void signal_noignore_sig(int sig);

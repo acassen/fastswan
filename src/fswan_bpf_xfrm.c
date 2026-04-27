@@ -173,7 +173,7 @@ static int
 fswan_bpf_xfrm_policy_src_pfx_add(xfrm_policy_t *p, struct ipv4_xfrm_policy *n, int *idx)
 {
 	struct ipv4_pfx *src_pfx;
-	uint32_t mask = inet_bits2mask(p->prefixlen_s);
+	uint32_t mask = inet_bits_to_mask(p->prefixlen_s);
 	int i, idx_available = -1;
 
 	if (__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_SRC_MATCH_BIT, &daemon_data->flags))
@@ -215,7 +215,7 @@ fswan_bpf_xfrm_policy_src_pfx_del(struct bpf_map *map, struct ipv4_lpm_key *lpm_
 				  xfrm_policy_t *p, struct ipv4_xfrm_policy *pol, int *idx, int *inuse)
 {
 	struct ipv4_pfx *src_pfx;
-	uint32_t mask = inet_bits2mask(p->prefixlen_s);
+	uint32_t mask = inet_bits_to_mask(p->prefixlen_s);
 	int i, alloc = 0, err = -1;
 
 	if (__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_SRC_MATCH_BIT, &daemon_data->flags))
@@ -250,7 +250,7 @@ fswan_bpf_xfrm_policy_set(xfrm_policy_t *p, struct ipv4_xfrm_policy *n)
 {
 	n->pfx_len = p->prefixlen_d;
 	n->pfx = p->daddr.a4;
-	n->src_pfx[0].mask = inet_bits2mask(p->prefixlen_s);
+	n->src_pfx[0].mask = inet_bits_to_mask(p->prefixlen_s);
 	n->src_pfx[0].addr = p->saddr.a4;
 	n->ifindex = p->ifindex;
 	if (__test_bit(XFRM_POLICY_FL_IN_BIT, &p->flags))
@@ -527,7 +527,7 @@ fswan_bpf_xfrm_policy_pfx_vty(vty_t *vty, fswan_bpf_opts_t *opts, struct ipv4_lp
 			continue;
 
 		vty_out(vty, " src %u.%u.%u.%u/%u dst %u.%u.%u.%u/%u dir %s dev %s%s"
-			   , NIPQUAD(pfx->addr), inet_mask2bits(pfx->mask)
+			   , NIPQUAD(pfx->addr), inet_mask_to_bits(pfx->mask)
 			   , NIPQUAD(key->pfx), key->pfx_len
 			   , (p->flags & XFRM_POLICY_FL_INGRESS) ? "in" : "out"
 			   , if_indextoname(p->ifindex, ifname), VTY_NEWLINE);

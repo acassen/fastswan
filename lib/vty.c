@@ -3,47 +3,47 @@
  * Copyright (C) 1997 Kunihiro Ishiguro
  */
 
-#include <errno.h>
-#include <ctype.h>
-#include <termios.h>
+#include <stdio.h>
+#include <stdint.h>
 #include <stdarg.h>
 #include <unistd.h>
-#include <time.h>
-#include <stdint.h>
-#include <stdio.h>
+#include <string.h>
+#include <ctype.h>
+#include <errno.h>
+#include <termios.h>
 #include <fcntl.h>
 #include <arpa/telnet.h>
-#include <sys/types.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/param.h>
 #include <netinet/tcp.h>
+#include <sys/utsname.h>
+#include <sys/un.h>
+#include <time.h>
 
-#include "scheduler.h"
-#include "vty.h"
-#include "timer.h"
 #include "utils.h"
+#include "inet_utils.h"
 #include "command.h"
 #include "memory.h"
+#include "config.h"
 #include "logger.h"
 
 
-static void vty_event(thread_master_t *, event_t, int, void *);
-static void vty_timeout(thread_ref_t);
+static void vty_event(struct thread_master *, enum vty_event, int, void *);
 
 /* Extern host structure from command.c */
-extern host_t host;
+extern struct host host;
 
 /* Extern master thread structure */
-extern thread_master_t *master;
+extern struct thread_master *master;
 
 /* Vector which store each vty structure. */
-static vector_t *vtyvec;
+static struct vector *vtyvec;
 
 /* Vty timeout value. */
 static unsigned long vty_timeout_val = VTY_TIMEOUT_DEFAULT;
 
 /* VTY server thread. */
-vector_t *Vvty_serv_thread;
+struct vector *Vvty_serv_thread;
 
 /* Current directory. */
 char *vty_cwd = NULL;
@@ -54,88 +54,158 @@ static int vty_config;
 /* Login password check. */
 static int no_password_check = 0;
 
+/* Active VTY session count and hard ceiling. */
+static int vty_connections;
+#define VTY_MAX_CONNECTIONS	16
+
 /* Integrated configuration file path */
-#define SYSCONFDIR      "/etc/fastswan"
+#define SYSCONFDIR      "/etc/gtp-guard"
 
 
 /* VTY standard output function. */
+static char *
+vty_buffer_build(char *dst, size_t dsize, int *len, const char *fmt, va_list args)
+{
+	va_list ap;
+	char *p = NULL;
+
+	va_copy(ap, args);
+
+	/* Try to write to initial buffer */
+	*len = vsnprintf(dst, dsize, fmt, args);
+	if (*len < 0)
+		goto err;
+
+	/* Initial buffer is not enough */
+	if ((size_t)*len >= dsize) {
+		p = MALLOC(*len + 1);
+		if (!p)
+			goto err;
+
+		*len = vsnprintf(p, *len + 1, fmt, ap);
+		if (*len < 0)
+			goto err;
+	}
+
+	va_end(ap);
+
+	/* When initial buffer is enough to store all output */
+	return (p) ? : dst;
+err:
+	va_end(ap);
+	FREE_PTR(p);
+	return NULL;
+}
+
+static void
+vty_buffer_put(struct vty *vty, char *buf, int bsize)
+{
+	char *s, *e;
+
+	if (vty->type != VTY_TERM) {
+		/* Pointer p must point out buffer */
+		buffer_put(vty->obuf, (u_char *) buf, bsize);
+		return;
+	}
+
+	/* Convert '\n' to '\r\n' if needed */
+	for (s = buf; s < buf + bsize; s = e + 1) {
+		e = strchrnul(s, '\n');
+		buffer_put(vty->obuf, s, e - s);
+		if (e[0] == '\n' && e > s && e[-1] != '\r')
+			buffer_put(vty->obuf, "\r\n", 2);
+		else if (e[0] == '\n')
+			buffer_put(vty->obuf, "\n", 1);
+	}
+}
+
 int
-vty_out(vty_t *vty, const char *format, ...)
+vty_out(struct vty *vty, const char *fmt, ...)
 {
 	va_list args;
 	int len = 0;
-	int size = 1024;
 	char buf[1024];
-	char *tmp = NULL;
 	char *p = NULL;
 
 	if (vty_shell(vty)) {
-		va_start(args, format);
-		vprintf(format, args);
+		va_start(args, fmt);
+		vprintf(fmt, args);
 		va_end(args);
-	} else {
-		/* Try to write to initial buffer.  */
-		va_start(args, format);
-		len = vsnprintf(buf, sizeof buf, format, args);
-		va_end(args);
-
-		/* Initial buffer is not enough.  */
-		if (len < 0 || len >= size) {
-		for (;;) {
-			if (len > -1)
-				size = len + 1;
-			else
-				size = size * 2;
-
-			tmp = REALLOC(p, size);
-			if (! tmp) {
-				FREE(p);
-				return -1;
-			}
-			p = tmp;
-
-			va_start(args, format);
-			len = vsnprintf(p, size, format, args);
-			va_end(args);
-
-			if (len > -1 && len < size)
-				break;
-		}
+		return len;
 	}
 
-	/* When initial buffer is enough to store all output.  */
-	if (!p)
-		p = buf;
+	/* Try to write to initial buffer */
+	va_start(args, fmt);
+	p = vty_buffer_build(buf, sizeof buf, &len, fmt, args);
+	va_end(args);
 
-	/* Pointer p must point out buffer. */
-	buffer_put(vty->obuf, (u_char *) p, len);
+	if (!p)
+		return -1;
+
+	vty_buffer_put(vty, p, len);
+
+	/* If p is different from buf, it is an allocated buffer */
+	if (p != buf)
+		FREE(p);
+
+	return len;
+}
+
+int
+vty_brd_out(const char *fmt, ...)
+{
+	va_list args;
+	int len = 0;
+	unsigned int i;
+	struct vty *v;
+	char buf[1024];
+	char *p = NULL;
+
+	/* Try to write to initial buffer.  */
+	va_start(args, fmt);
+	p = vty_buffer_build(buf, sizeof buf, &len, fmt, args);
+	va_end(args);
+
+	if (!p)
+		return -1;
+
+	for (i = 0; i < vector_active(vtyvec); i++) {
+		if ((v = vector_slot(vtyvec, i)) != NULL && v->monitor) {
+			vty_buffer_put(v, p, len);
+			vty_event(master, VTY_WRITE, v->fd, v);
+		}
+	}
 
 	/* If p is not different with buf, it is allocated buffer.  */
 	if (p != buf)
 		FREE(p);
-	}
 
 	return len;
 }
 
 ssize_t
-vty_send_out(vty_t *vty, const char *format, ...)
+vty_send_out(struct vty *vty, const char *fmt, ...)
 {
 	va_list args;
 	int len = 0;
 	char buf[1024];
 
-	/* Try to write to initial buffer.  */
-	va_start(args, format);
-	len = vsnprintf(buf, sizeof(buf), format, args);
+	va_start(args, fmt);
+	len = vsnprintf(buf, sizeof(buf), fmt, args);
 	va_end(args);
+
+	/* vsnprintf returns the would-be length; clamp to avoid over-read */
+	if (len < 0)
+		return -1;
+	if ((size_t)len >= sizeof(buf))
+		len = sizeof(buf) - 1;
 
 	return write(vty->fd, buf, len);
 }
 
 /* Output current time to vty. */
 void
-vty_time_print(vty_t *vty, int cr)
+vty_time_print(struct vty *vty, int cr)
 {
 	struct tm tmp;
 	time_t current_time;
@@ -153,7 +223,7 @@ vty_time_print(vty_t *vty, int cr)
 
 /* Say hello to vty interface. */
 void
-vty_hello(vty_t *vty)
+vty_hello(struct vty *vty)
 {
 	if (host.motdfile) {
 		FILE *f;
@@ -179,7 +249,7 @@ vty_hello(vty_t *vty)
 
 /* Put out prompt and wait input from user. */
 static void
-vty_prompt(vty_t *vty)
+vty_prompt(struct vty *vty)
 {
 	struct utsname names;
 	const char *hostname = NULL;
@@ -196,13 +266,13 @@ vty_prompt(vty_t *vty)
 }
 
 void
-vty_prompt_hold(vty_t *vty)
+vty_prompt_hold(struct vty *vty)
 {
 	vty->status = VTY_HOLD;
 }
 
 void
-vty_prompt_restore(vty_t *vty)
+vty_prompt_restore(struct vty *vty)
 {
 	struct utsname names;
 	const char *hostname = NULL;
@@ -219,41 +289,41 @@ vty_prompt_restore(vty_t *vty)
 
 /* Send WILL TELOPT_ECHO to remote server. */
 static void
-vty_will_echo(vty_t *vty)
+vty_will_echo(struct vty *vty)
 {
-	unsigned char cmd[] = { IAC, WILL, TELOPT_ECHO, '\0' };
-	vty_out(vty, "%s", cmd);
+	unsigned char cmd[] = { IAC, WILL, TELOPT_ECHO };
+	buffer_put(vty->obuf, cmd, sizeof(cmd));
 }
 
 /* Make suppress Go-Ahead telnet option. */
 static void
-vty_will_suppress_go_ahead(vty_t *vty)
+vty_will_suppress_go_ahead(struct vty *vty)
 {
-	unsigned char cmd[] = { IAC, WILL, TELOPT_SGA, '\0' };
-	vty_out(vty, "%s", cmd);
+	unsigned char cmd[] = { IAC, WILL, TELOPT_SGA };
+	buffer_put(vty->obuf, cmd, sizeof(cmd));
 }
 
 /* Make don't use linemode over telnet. */
 static void
-vty_dont_linemode(vty_t *vty)
+vty_dont_linemode(struct vty *vty)
 {
-	unsigned char cmd[] = { IAC, DONT, TELOPT_LINEMODE, '\0' };
-	vty_out(vty, "%s", cmd);
+	unsigned char cmd[] = { IAC, DONT, TELOPT_LINEMODE };
+	buffer_put(vty->obuf, cmd, sizeof(cmd));
 }
 
 /* Use window size. */
 static void
-vty_do_window_size(vty_t *vty)
+vty_do_window_size(struct vty *vty)
 {
-	unsigned char cmd[] = { IAC, DO, TELOPT_NAWS, '\0' };
-	vty_out(vty, "%s", cmd);
+	unsigned char cmd[] = { IAC, DO, TELOPT_NAWS };
+	buffer_put(vty->obuf, cmd, sizeof(cmd));
 }
 
 /* Allocate new vty struct. */
-vty_t *
+struct vty *
 vty_new(void)
 {
-	vty_t *new = (vty_t *) MALLOC(sizeof(vty_t));
+	struct vty *new = (struct vty *) MALLOC(sizeof(*new));
 
 	new->obuf = buffer_new(0);	/* Use default buffer size. */
 	new->buf = (char *) MALLOC(VTY_BUFSIZ);
@@ -262,40 +332,43 @@ vty_new(void)
 	return new;
 }
 
+/* Constant-time password comparison to prevent timing side-channels. */
+static int
+passwd_cmp(const char *a, const char *b)
+{
+	size_t la = strlen(a), lb = strlen(b);
+	unsigned char diff = (unsigned char)(la != lb);
+	size_t i;
+
+	for (i = 0; i < la; i++)
+		diff |= (unsigned char)a[i] ^ (unsigned char)(i < lb ? b[i] : 0);
+	return (int)diff;
+}
+
 /* Authentication of vty */
 static void
-vty_auth(vty_t *vty, char *buf)
+vty_auth(struct vty *vty, char *buf)
 {
 	char *passwd = NULL;
-	node_type_t next_node = 0;
+	enum node_type next_node = 0;
 	int fail;
 
 	switch (vty->node) {
 	case AUTH_NODE:
-		if (host.encrypt)
-			passwd = host.password_encrypt;
-		else
-			passwd = host.password;
+		passwd = host.password;
 		if (host.advanced)
 			next_node = host.enable ? VIEW_NODE : ENABLE_NODE;
 		else
 			next_node = VIEW_NODE;
 		break;
 	case AUTH_ENABLE_NODE:
-		if (host.encrypt)
-			passwd = host.enable_encrypt;
-		else
-			passwd = host.enable;
+		passwd = host.enable;
 		next_node = ENABLE_NODE;
 		break;
 	}
 
 	if (passwd) {
-		if (host.encrypt)
-			/* FIXME: eather remove or use recent stuff */
-			fail = strcmp(buf, passwd);
-		else
-			fail = strcmp(buf, passwd);
+		fail = passwd_cmp(buf, passwd);
 	} else {
 		fail = 1;
 	}
@@ -321,10 +394,10 @@ vty_auth(vty_t *vty, char *buf)
 
 /* Command execution over the vty interface. */
 static int
-vty_command(vty_t *vty, char *buf)
+vty_command(struct vty *vty, char *buf)
 {
 	int ret;
-	vector_t *vline;
+	struct vector *vline;
 
 	/* Split readline string up into the vector */
 	vline = cmd_make_strvec(buf);
@@ -362,28 +435,35 @@ static const char telnet_space_char = ' ';
 
 /* Basic function to write buffer to vty. */
 static void
-vty_write(vty_t *vty, const char *buf, size_t nbytes)
+vty_write(struct vty *vty, const char *buf, size_t nbytes)
 {
 	if ((vty->node == AUTH_NODE) || (vty->node == AUTH_ENABLE_NODE))
 		return;
 
 	/* Should we do buffering here ?  And make vty_flush (vty) ? */
 	buffer_put(vty->obuf, buf, nbytes);
+
+	if (vty->monitor)
+		buffer_flush_available(vty->obuf, vty->fd);
 }
 
 /* Ensure length of input buffer.  Is buffer is short, double it. */
 static void
-vty_ensure(vty_t *vty, int length)
+vty_ensure(struct vty *vty, int length)
 {
 	if (vty->max <= length) {
-		vty->max *= 2;
+		if (vty->max >= VTY_MAX_BUFSIZ) {
+			vty->status = VTY_CLOSE;
+			return;
+		}
+		vty->max = (vty->max * 2 < VTY_MAX_BUFSIZ) ? vty->max * 2 : VTY_MAX_BUFSIZ;
 		vty->buf = REALLOC(vty->buf, vty->max);
 	}
 }
 
 /* Basic function to insert character into vty. */
 static void
-vty_self_insert(vty_t *vty, char c)
+vty_self_insert(struct vty *vty, char c)
 {
 	int i, length;
 
@@ -402,7 +482,7 @@ vty_self_insert(vty_t *vty, char c)
 
 /* Self insert character 'c' in overwrite mode. */
 static void
-vty_self_insert_overwrite(vty_t *vty, char c)
+vty_self_insert_overwrite(struct vty *vty, char c)
 {
 	vty_ensure(vty, vty->length + 1);
 	vty->buf[vty->cp++] = c;
@@ -418,18 +498,19 @@ vty_self_insert_overwrite(vty_t *vty, char c)
 
 /* Insert a word into vty interface with overwrite mode. */
 static void
-vty_insert_word_overwrite(vty_t *vty, char *str)
+vty_insert_word_overwrite(struct vty *vty, char *str)
 {
 	int len = strlen (str);
+	vty_ensure(vty, vty->cp + len);
 	vty_write(vty, str, len);
-	strcpy(&vty->buf[vty->cp], str);
+	memcpy(&vty->buf[vty->cp], str, len + 1);
 	vty->cp += len;
 	vty->length = vty->cp;
 }
 
 /* Forward character. */
 static void
-vty_forward_char(vty_t *vty)
+vty_forward_char(struct vty *vty)
 {
 	if (vty->cp < vty->length) {
 		vty_write(vty, &vty->buf[vty->cp], 1);
@@ -439,7 +520,7 @@ vty_forward_char(vty_t *vty)
 
 /* Backward character. */
 static void
-vty_backward_char(vty_t *vty)
+vty_backward_char(struct vty *vty)
 {
 	if (vty->cp > 0) {
 		vty->cp--;
@@ -449,7 +530,7 @@ vty_backward_char(vty_t *vty)
 
 /* Move to the beginning of the line. */
 static void
-vty_beginning_of_line(vty_t *vty)
+vty_beginning_of_line(struct vty *vty)
 {
 	while (vty->cp) {
 		vty_backward_char(vty);
@@ -458,19 +539,19 @@ vty_beginning_of_line(vty_t *vty)
 
 /* Move to the end of the line. */
 static void
-vty_end_of_line(vty_t *vty)
+vty_end_of_line(struct vty *vty)
 {
 	while (vty->cp < vty->length)
 		vty_forward_char (vty);
 }
 
-static void vty_kill_line_from_beginning(vty_t *);
-static void vty_redraw_line(vty_t *);
+static void vty_kill_line_from_beginning(struct vty *);
+static void vty_redraw_line(struct vty *);
 
 /* Print command line history.  This function is called from
  * vty_next_line and vty_previous_line. */
 static void
-vty_history_print(vty_t *vty)
+vty_history_print(struct vty *vty)
 {
 	int length;
 
@@ -487,7 +568,7 @@ vty_history_print(vty_t *vty)
 
 /* Show next command line history. */
 static void
-vty_next_line(vty_t *vty)
+vty_next_line(struct vty *vty)
 {
 	int try_index;
 
@@ -514,7 +595,7 @@ vty_next_line(vty_t *vty)
 
 /* Show previous command line history. */
 static void
-vty_previous_line(vty_t *vty)
+vty_previous_line(struct vty *vty)
 {
 	int try_index;
 
@@ -536,7 +617,7 @@ vty_previous_line(vty_t *vty)
 
 /* This function redraw all of the command line character. */
 void
-vty_redraw_line(vty_t *vty)
+vty_redraw_line(struct vty *vty)
 {
 	vty_write(vty, vty->buf, vty->length);
 	vty->cp = vty->length;
@@ -544,7 +625,7 @@ vty_redraw_line(vty_t *vty)
 
 /* Forward word. */
 static void
-vty_forward_word(vty_t *vty)
+vty_forward_word(struct vty *vty)
 {
 	while (vty->cp != vty->length && vty->buf[vty->cp] != ' ')
 		vty_forward_char(vty);
@@ -555,7 +636,7 @@ vty_forward_word(vty_t *vty)
 
 /* Backward word without skipping training space. */
 static void
-vty_backward_pure_word(vty_t *vty)
+vty_backward_pure_word(struct vty *vty)
 {
 	while (vty->cp > 0 && vty->buf[vty->cp - 1] != ' ')
 		vty_backward_char(vty);
@@ -563,7 +644,7 @@ vty_backward_pure_word(vty_t *vty)
 
 /* Backward word. */
 static void
-vty_backward_word(vty_t *vty)
+vty_backward_word(struct vty *vty)
 {
 	while (vty->cp > 0 && vty->buf[vty->cp - 1] == ' ')
 		vty_backward_char(vty);
@@ -575,7 +656,7 @@ vty_backward_word(vty_t *vty)
 /* When '^D' is typed at the beginning of the line we move to the down
  * level. */
 static void
-vty_down_level(vty_t *vty)
+vty_down_level(struct vty *vty)
 {
 	vty_out(vty, "%s", VTY_NEWLINE);
 		(*config_exit_cmd.func) (NULL, vty, 0, NULL);
@@ -585,7 +666,7 @@ vty_down_level(vty_t *vty)
 
 /* When '^Z' is received from vty, move down to the enable mode. */
 static void
-vty_end_config(vty_t *vty)
+vty_end_config(struct vty *vty)
 {
 	vty_out(vty, "%s", VTY_NEWLINE);
 
@@ -606,7 +687,7 @@ vty_end_config(vty_t *vty)
 
 /* Delete a charcter at the current point. */
 static void
-vty_delete_char(vty_t *vty)
+vty_delete_char(struct vty *vty)
 {
 	int i, size;
 
@@ -631,12 +712,12 @@ vty_delete_char(vty_t *vty)
 	vty_write(vty, &telnet_space_char, 1);
 
 	for (i = 0; i < size; i++)
-		vty_write (vty, &telnet_backward_char, 1);
+		vty_write(vty, &telnet_backward_char, 1);
 }
 
 /* Delete a character before the point. */
 static void
-vty_delete_backward_char(vty_t *vty)
+vty_delete_backward_char(struct vty *vty)
 {
 	if (vty->cp == 0)
 		return;
@@ -647,7 +728,7 @@ vty_delete_backward_char(vty_t *vty)
 
 /* Kill rest of line from current point. */
 static void
-vty_kill_line(vty_t *vty)
+vty_kill_line(struct vty *vty)
 {
 	int i, size;
 
@@ -661,21 +742,21 @@ vty_kill_line(vty_t *vty)
 	for (i = 0; i < size; i++)
 		vty_write(vty, &telnet_backward_char, 1);
 
-	memset (&vty->buf[vty->cp], 0, size);
+	memset(&vty->buf[vty->cp], 0, size);
 	vty->length = vty->cp;
 }
 
 /* Kill line from the beginning. */
 static void
-vty_kill_line_from_beginning(vty_t *vty)
+vty_kill_line_from_beginning(struct vty *vty)
 {
-	vty_beginning_of_line (vty);
-	vty_kill_line (vty);
+	vty_beginning_of_line(vty);
+	vty_kill_line(vty);
 }
 
 /* Delete a word before the point. */
 static void
-vty_forward_kill_word(vty_t *vty)
+vty_forward_kill_word(struct vty *vty)
 {
 	while (vty->cp != vty->length && vty->buf[vty->cp] == ' ')
 		vty_delete_char(vty);
@@ -685,7 +766,7 @@ vty_forward_kill_word(vty_t *vty)
 
 /* Delete a word before the point. */
 static void
-vty_backward_kill_word(vty_t *vty)
+vty_backward_kill_word(struct vty *vty)
 {
 	while (vty->cp > 0 && vty->buf[vty->cp - 1] == ' ')
 		vty_delete_backward_char(vty);
@@ -695,7 +776,7 @@ vty_backward_kill_word(vty_t *vty)
 
 /* Transpose chars before or at the point. */
 static void
-vty_transpose_chars(vty_t *vty)
+vty_transpose_chars(struct vty *vty)
 {
 	char c1, c2;
 
@@ -725,11 +806,11 @@ vty_transpose_chars(vty_t *vty)
 
 /* Do completion at vty interface. */
 static void
-vty_complete_command(vty_t *vty)
+vty_complete_command(struct vty *vty)
 {
 	int i, ret;
 	char **matched = NULL;
-	vector_t *vline;
+	struct vector *vline;
 
 	if (vty->node == AUTH_NODE || vty->node == AUTH_ENABLE_NODE)
 		return;
@@ -799,7 +880,7 @@ vty_complete_command(vty_t *vty)
 }
 
 static void
-vty_describe_fold(vty_t *vty, int cmd_width, unsigned int desc_width, desc_t *desc)
+vty_describe_fold(struct vty *vty, int cmd_width, unsigned int desc_width, struct desc *desc)
 {
 	char *buf;
 	const char *cmd, *p;
@@ -836,12 +917,12 @@ vty_describe_fold(vty_t *vty, int cmd_width, unsigned int desc_width, desc_t *de
 
 /* Describe matched command function. */
 static void
-vty_describe_command(vty_t *vty)
+vty_describe_command(struct vty *vty)
 {
 	int ret;
-	vector_t *vline, *describe;
+	struct vector *vline, *describe;
 	unsigned int i, width, desc_width;
-	desc_t *desc, *desc_cr = NULL;
+	struct desc *desc, *desc_cr = NULL;
 
 	vline = cmd_make_strvec(vty->buf);
 
@@ -941,14 +1022,14 @@ out:
 }
 
 static void
-vty_clear_buf(vty_t *vty)
+vty_clear_buf(struct vty *vty)
 {
 	memset(vty->buf, 0, vty->max);
 }
 
 /* ^C stop current input and do not add command line to the history. */
 static void
-vty_stop_input(vty_t *vty)
+vty_stop_input(struct vty *vty)
 {
 	vty->cp = vty->length = 0;
 	vty_clear_buf(vty);
@@ -976,7 +1057,7 @@ vty_stop_input(vty_t *vty)
 
 /* Add current command line to the history buffer. */
 static void
-vty_hist_add(vty_t *vty)
+vty_hist_add(struct vty *vty)
 {
 	int index;
 
@@ -1007,7 +1088,7 @@ vty_hist_add(vty_t *vty)
 
 /* Get telnet window size. */
 static int
-vty_telnet_option(vty_t *vty, unsigned char *buf, int nbytes)
+vty_telnet_option(struct vty *vty, unsigned char *buf, __attribute__((unused)) int nbytes)
 {
 	switch (buf[0]) {
 	case SB:
@@ -1054,7 +1135,7 @@ vty_telnet_option(vty_t *vty, unsigned char *buf, int nbytes)
 
 /* Execute current command line. */
 static int
-vty_execute(vty_t *vty)
+vty_execute(struct vty *vty)
 {
 	int ret;
 
@@ -1090,7 +1171,7 @@ vty_execute(vty_t *vty)
 
 /* Escape character command map. */
 static void
-vty_escape_map(unsigned char c, vty_t *vty)
+vty_escape_map(unsigned char c, struct vty *vty)
 {
 	switch (c) {
 	case ('A'):
@@ -1115,7 +1196,7 @@ vty_escape_map(unsigned char c, vty_t *vty)
 
 /* Quit print out to the buffer. */
 static void
-vty_buffer_reset(vty_t *vty)
+vty_buffer_reset(struct vty *vty)
 {
 	buffer_reset(vty->obuf);
 	vty_prompt(vty);
@@ -1124,34 +1205,27 @@ vty_buffer_reset(vty_t *vty)
 
 /* Read data via vty socket. */
 static void
-vty_read(thread_ref_t thread)
+vty_read(struct thread *t)
 {
 	int i, nbytes;
 	unsigned char buf[VTY_READ_BUFSIZ];
+	int vty_sock = THREAD_FD(t);
+	struct vty *vty = THREAD_ARG(t);
 
-	int vty_sock = THREAD_FD(thread);
-	vty_t *vty = THREAD_ARG(thread);
-	vty->t_read = NULL;
-
-	/* Handle Read Timeout */
-	if (thread->type == THREAD_READ_TIMEOUT) {
-		vty_event(thread->master, VTY_READ, vty_sock, vty);
+	/* Read Timeout means idle connection */
+	if (t->type == THREAD_READ_TIMEOUT) {
+		buffer_reset(vty->obuf);
+		vty_out(vty, "%sVty connection is timed out.%s", VTY_NEWLINE, VTY_NEWLINE);
+		vty->status = VTY_CLOSE;
+		vty_close(vty);
 		return;
-	}
-
-	/* Time out treatment. */
-	if (vty->v_timeout) {
-		if (vty->t_timeout)
-			thread_cancel(vty->t_timeout);
-		vty->t_timeout = thread_add_timer(thread->master, vty_timeout, vty,
-						  vty->v_timeout*TIMER_HZ);
 	}
 
 	/* Read raw data from socket */
 	if ((nbytes = read(vty->fd, buf, VTY_READ_BUFSIZ)) <= 0) {
 		if (nbytes < 0) {
 			if (ERRNO_IO_RETRY(errno)) {
-				vty_event(thread->master, VTY_READ, vty_sock, vty);
+				vty_event(t->master, VTY_READ, vty_sock, vty);
 				return;
 			}
 			vty->monitor = 0; /* disable monitoring to avoid infinite recursion */
@@ -1175,7 +1249,8 @@ vty_read(thread_ref_t thread)
 		if (vty->iac_sb_in_progress && !vty->iac) {
 			if (vty->sb_len < sizeof(vty->sb_buf))
 				vty->sb_buf[vty->sb_len] = buf[i];
-			vty->sb_len++;
+			if (vty->sb_len < SIZE_MAX)
+				vty->sb_len++;
 			continue;
 		}
 
@@ -1254,7 +1329,7 @@ vty_read(thread_ref_t thread)
 			vty_end_of_line(vty);
 			break;
 		case CONTROL('F'):
-			vty_forward_char (vty);
+			vty_forward_char(vty);
 			break;
 		case CONTROL('H'):
 		case 0x7f:
@@ -1313,35 +1388,34 @@ vty_read(thread_ref_t thread)
 
 	/* Check status. */
 	if (vty->status == VTY_CLOSE) {
-		thread_del_read(thread);
 		vty_close(vty);
 		return;
 	}
 
-	vty_event(thread->master, VTY_WRITE, vty_sock, vty);
-	vty_event(thread->master, VTY_READ, vty_sock, vty);
+	vty_event(t->master, VTY_WRITE, vty_sock, vty);
+	vty_event(t->master, VTY_READ, vty_sock, vty);
 }
 
 /* Flush buffer to the vty. */
 static void
-vty_flush(thread_ref_t thread)
+vty_flush(struct thread *t)
 {
 	int erase;
-	buffer_status_t flushrc;
-	int vty_sock = THREAD_FD(thread);
-	vty_t *vty = THREAD_ARG(thread);
+	enum buffer_status flushrc;
+	int vty_sock = THREAD_FD(t);
+	struct vty *vty = THREAD_ARG(t);
 
 	vty->t_write = NULL;
 
 	/* Handle Write Timeout */
-	if (thread->type == THREAD_WRITE_TIMEOUT) {
-		vty_event(thread->master, VTY_WRITE, vty_sock, vty);
+	if (t->type == THREAD_WRITE_TIMEOUT) {
+		vty_event(t->master, VTY_WRITE, vty_sock, vty);
 		return;
 	}
 
 	/* Tempolary disable read thread. */
 	if ((vty->lines == 0) && vty->t_read) {
-		thread_cancel(vty->t_read);
+		thread_del(vty->t_read);
 		vty->t_read = NULL;
 	}
 
@@ -1349,7 +1423,7 @@ vty_flush(thread_ref_t thread)
 	erase = ((vty->status == VTY_MORE || vty->status == VTY_MORELINE));
 
 	/* N.B. if width is 0, that means we don't know the window size. */
-	if ((vty->lines == 0) || (vty->width == 0)) {
+	if ((vty->lines == 0) || (vty->width == 0) || (vty->monitor)) {
 		flushrc = buffer_flush_available(vty->obuf, vty->fd);
 	} else if (vty->status == VTY_MORELINE) {
 		flushrc = buffer_flush_window(vty->obuf, vty->fd, vty->width,
@@ -1357,7 +1431,7 @@ vty_flush(thread_ref_t thread)
 	} else {
 		flushrc = buffer_flush_window(vty->obuf, vty->fd, vty->width,
 					      vty->lines >= 0 ? vty->lines :
-							        vty->height,
+								vty->height,
 					      erase, 0);
 	}
 
@@ -1367,11 +1441,11 @@ vty_flush(thread_ref_t thread)
 		log_message(LOG_WARNING, "buffer_flush failed on vty client fd %d, closing"
 				       , vty->fd);
 		buffer_reset(vty->obuf);
-		thread_del_write(thread);
+		thread_del(t);
 		vty_close(vty);
 		break;
 	case BUFFER_EMPTY:
-		thread_del_write(thread);
+		thread_del(t);
 		if (vty->status == VTY_CLOSE) {
 			vty_close(vty);
 			break;
@@ -1379,29 +1453,37 @@ vty_flush(thread_ref_t thread)
 
 		vty->status = VTY_NORMAL;
 		if (vty->lines == 0)
-			vty_event(thread->master, VTY_READ, vty_sock, vty);
+			vty_event(t->master, VTY_READ, vty_sock, vty);
 		break;
 	case BUFFER_PENDING:
 		/* There is more data waiting to be written. */
 		vty->status = VTY_MORE;
 		if (vty->lines == 0) {
-			vty_event(thread->master, VTY_WRITE, vty_sock, vty);
+			vty_event(t->master, VTY_WRITE, vty_sock, vty);
 			break;
 		}
 
-		thread_del_write(thread);
+		thread_del(t);
 		break;
 	}
 }
 
 /* Create new vty structure. */
-static vty_t *
-vty_create(thread_master_t *m, int vty_sock, struct sockaddr_storage *addr)
+static struct vty *
+vty_create(struct thread_master *m, int vty_sock, struct sockaddr_storage *addr)
 {
-	vty_t *vty;
+	struct vty *vty;
+
+	if (vty_connections >= VTY_MAX_CONNECTIONS) {
+		log_message(LOG_WARNING, "Vty connection limit (%d) reached, rejecting"
+				       , VTY_MAX_CONNECTIONS);
+		close(vty_sock);
+		return NULL;
+	}
 
 	/* Allocate new vty structure and set up default values. */
 	vty = vty_new();
+	vty_connections++;
 	vty->fd = vty_sock;
 	vty->type = VTY_TERM;
 	vty->address = *addr;
@@ -1429,7 +1511,7 @@ vty_create(thread_master_t *m, int vty_sock, struct sockaddr_storage *addr)
 
 	if (!no_password_check) {
 		/* Vty is not available if password isn't set. */
-		if (host.password == NULL && host.password_encrypt == NULL) {
+		if (host.password == NULL) {
 			vty_out(vty, "Vty password is not set.%s", VTY_NEWLINE);
 			vty->status = VTY_CLOSE;
 			vty_close(vty);
@@ -1462,22 +1544,17 @@ vty_create(thread_master_t *m, int vty_sock, struct sockaddr_storage *addr)
 
 /* Accept connection from the network. */
 static void
-vty_accept(thread_ref_t thread)
+vty_accept(struct thread *t)
 {
 	struct sockaddr_storage sock;
+	struct sockaddr *saddr = (struct sockaddr *) THREAD_ARG(t);
 	socklen_t len;
 	int vty_sock, ret;
 	unsigned int on = 1;
-	int accept_sock = THREAD_FD(thread);
+	int accept_sock = THREAD_FD(t);
 
-	/* Handle Read Timeout */
-	if (thread->type == THREAD_READ_TIMEOUT) {
-		vty_event(thread->master, VTY_SERV, accept_sock, thread->arg);
-		return;
-	}
-
-	/* We continue hearing vty socket. */
-	vty_event(thread->master, VTY_SERV, accept_sock, thread->arg);
+	/* Re-arm the listener for the next connection. */
+	vty_event(t->master, VTY_SERV, accept_sock, t->arg);
 
 	/* We can handle IPv4 or IPv6 socket. */
 	memset(&sock, 0, sizeof(struct sockaddr_storage));
@@ -1489,77 +1566,167 @@ vty_accept(thread_ref_t thread)
 		return;
 	}
 
-	/* Set NODELAY */
-	ret = setsockopt(vty_sock, IPPROTO_TCP, TCP_NODELAY, 
-			 (char *) &on, sizeof(on));
-	if (ret < 0) {
-		log_message(LOG_INFO, "can't set sockopt to vty_sock : %m");
+	if (saddr->sa_family == AF_UNIX) {
+		log_message(LOG_INFO, "Vty unix connection accepted");
+		goto end;
 	}
 
-	log_message(LOG_INFO, "Vty connection from %s" , inet_sockaddrtos(&sock));
+	ret = setsockopt(vty_sock, IPPROTO_TCP, TCP_NODELAY,
+			 (char *) &on, sizeof(on));
+	if (ret < 0)
+		log_message(LOG_INFO, "can't set sockopt to vty_sock : %m");
+	log_message(LOG_INFO, "Vty connection from %s", inet_sockaddrtos(&sock));
 
-	vty_create(thread->master, vty_sock, &sock);
+end:
+	vty_create(t->master, vty_sock, &sock);
 }
 
-/* Start listner thread */
+/* Start listener thread */
 int
-vty_listen(thread_master_t *m, struct sockaddr_storage *addr)
+vty_listen(struct thread_master *m, struct sockaddr_storage *addr)
 {
-	int accept_sock, ret, on = 1;
-	socklen_t len;
+	int ret, accept_sock, on = 1;
 	mode_t old_mask;
 
-	/* Mask */
 	old_mask = umask(0077);
 
-	/* Socket */
 	accept_sock = socket(addr->ss_family, SOCK_STREAM, 0);
 	if (accept_sock < 0) {
 		log_message(LOG_INFO, "Vty error creating listening socket on [%s]:%d (%m)"
 				    , inet_sockaddrtos(addr)
 				    , ntohs(inet_sockaddrport(addr)));
+		umask(old_mask);
 		return -1;
 	}
 
-	/* Socket tweaking */
 	ret = setsockopt(accept_sock, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
 	if (ret < 0) {
-		log_message(LOG_INFO, "Vty error cant do SO_REUSEADDR errno=%d (%ù)"
+		log_message(LOG_INFO, "Vty error cant do SO_REUSEADDR errno=%d (%m)"
 				    , errno);
-		close(accept_sock);
-		return -1;
+		goto err;
 	}
 
-	/* Socket bind */
-	len = sizeof(*addr);
-	ret = bind(accept_sock, (struct sockaddr *) addr, len);
+	ret = bind(accept_sock, (struct sockaddr *) addr, sizeof(*addr));
 	if (ret < 0) {
 		log_message(LOG_INFO, "Vty error cant bind to [%s]:%d (%m)"
 				    , inet_sockaddrtos(addr)
 				    , ntohs(inet_sockaddrport(addr)));
-		close(accept_sock);
-		return -1;
+		goto err;
 	}
 
-	/* Socket listen */
-	ret = listen(accept_sock, 3);
+	ret = listen(accept_sock, 16);
 	if (ret < 0) {
 		log_message(LOG_INFO, "Vty error cant listen to [%s]:%d (%m)"
 				    , inet_sockaddrtos(addr)
 				    , ntohs(inet_sockaddrport(addr)));
-		close(accept_sock);
-		return -1;
+		goto err;
 	}
 
-	/* Restore old mask */
 	umask(old_mask);
-
 	log_message(LOG_INFO, "Vty start listening on [%s]:%d"
 			    , inet_sockaddrtos(addr)
 			    , ntohs(inet_sockaddrport(addr)));
-
 	vty_event(m, VTY_SERV, accept_sock, addr);
 	return accept_sock;
+
+  err:
+	close(accept_sock);
+	umask(old_mask);
+	return -1;
+}
+
+/* Start unix domain socket listener */
+int
+vty_listen_unix(struct thread_master *m, const char *path,
+		const char *user, const char *group)
+{
+	struct vty_unix_sock *usock;
+	struct sockaddr_un *addr;
+	struct passwd *pw = NULL;
+	struct group *gr = NULL;
+	int ret, accept_sock;
+	uid_t uid = -1;
+	gid_t gid = -1;
+	mode_t old_mask;
+
+	/* Resolve user and group names */
+	if (user) {
+		pw = getpwnam(user);
+		if (!pw) {
+			log_message(LOG_INFO, "Vty error unknown user %s", user);
+			return -1;
+		}
+		uid = pw->pw_uid;
+	}
+
+	if (group) {
+		gr = getgrnam(group);
+		if (!gr) {
+			log_message(LOG_INFO, "Vty error unknown group %s", group);
+			return -1;
+		}
+		gid = gr->gr_gid;
+	}
+
+	usock = MALLOC(sizeof(struct vty_unix_sock));
+	addr = &usock->addr;
+	addr->sun_family = AF_UNIX;
+	strncpy(addr->sun_path, path, sizeof(addr->sun_path) - 1);
+	usock->uid = uid;
+	usock->gid = gid;
+
+	old_mask = umask(0077);
+
+	accept_sock = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (accept_sock < 0) {
+		log_message(LOG_INFO, "Vty error creating unix socket (%m)");
+		goto err;
+	}
+
+	unlink(path);
+
+	ret = bind(accept_sock, (struct sockaddr *) addr, sizeof(*addr));
+	if (ret < 0) {
+		log_message(LOG_INFO, "Vty error cant bind to %s (%m)", path);
+		close(accept_sock);
+		goto err;
+	}
+
+	/* Set socket ownership */
+	ret = chown(path, uid, gid);
+	if (ret < 0) {
+		log_message(LOG_INFO, "Vty error cant chown %s (%m)", path);
+		close(accept_sock);
+		goto err;
+	}
+
+	/* Allow group read/write access */
+	if (gid != (gid_t)-1) {
+		ret = chmod(path, 0770);
+		if (ret < 0) {
+			log_message(LOG_INFO, "Vty error cant chmod %s (%m)", path);
+			close(accept_sock);
+			goto err;
+		}
+	}
+
+	ret = listen(accept_sock, 16);
+	if (ret < 0) {
+		log_message(LOG_INFO, "Vty error cant listen on %s (%m)", path);
+		close(accept_sock);
+		goto err;
+	}
+
+	umask(old_mask);
+	log_message(LOG_INFO, "Vty start listening on unix:%s (uid:%d gid:%d)"
+			    , path, uid, gid);
+	vty_event(m, VTY_SERV, accept_sock, usock);
+	return accept_sock;
+
+  err:
+	FREE(usock);
+	umask(old_mask);
+	return -1;
 }
 
 /* Close vty interface.  Warning: call this only from functions that
@@ -1567,17 +1734,15 @@ vty_listen(thread_master_t *m, struct sockaddr_storage *addr)
  * now been freed).  This is safest from top-level functions (called
  * directly by the thread dispatcher). */
 void
-vty_close(vty_t *vty)
+vty_close(struct vty *vty)
 {
 	int i;
 
 	/* Cancel threads.*/
 	if (vty->t_read)
-		thread_cancel(vty->t_read);
+		thread_del(vty->t_read);
 	if (vty->t_write)
-		thread_cancel(vty->t_write);
-	if (vty->t_timeout)
-		thread_cancel(vty->t_timeout);
+		thread_del(vty->t_write);
 
 	/* Flush buffer. */
 	buffer_flush_all(vty->obuf, vty->fd);
@@ -1597,6 +1762,9 @@ vty_close(vty_t *vty)
 	if (vty->fd > 0)
 		close(vty->fd);
 
+	if (vty->type == VTY_TERM)
+		vty_connections--;
+
 	FREE_PTR(vty->buf);
 
 	/* Check configure. */
@@ -1606,31 +1774,23 @@ vty_close(vty_t *vty)
 	FREE(vty);
 }
 
-/* When time out occur output message then close connection. */
-static void
-vty_timeout(thread_ref_t thread)
+/* Re-register the VTY read thread after external suspension. */
+void
+vty_read_resume(struct vty *vty)
 {
-	vty_t *vty;
-
-	vty = THREAD_ARG(thread);
-	vty->t_timeout = NULL;
-	vty->v_timeout = 0;
-
-	/* Clear buffer*/
-	buffer_reset(vty->obuf);
-	vty_out(vty, "%sVty connection is timed out.%s", VTY_NEWLINE, VTY_NEWLINE);
-
-	/* Close connection. */
-	vty->status = VTY_CLOSE;
-	vty_close(vty);
+	if (!vty->t_read)
+		vty->t_read = thread_add_read(master, vty_read, vty, vty->fd,
+					      vty->v_timeout ? vty->v_timeout * TIMER_HZ : TIMER_NEVER,
+					      0);
 }
+
 
 /* Read up configuration file from file_name. */
 static int
 vty_read_file(FILE *confp)
 {
 	int ret;
-	vty_t *vty;
+	struct vty *vty;
 
 	vty = vty_new();
 	vty->fd = 0;			/* stdout */
@@ -1649,8 +1809,9 @@ vty_read_file(FILE *confp)
 			log_message(LOG_ERR, "There is no such command.\n");
 			break;
 		}
-		log_message(LOG_ERR, "Error occured during reading below line.\n%s\n"
-				   , vty->buf);
+		if (ret != CMD_WARNING)
+			log_message(LOG_ERR, "Error occured during reading below line.\n%s\n"
+					   , vty->buf);
 		vty_close(vty);
 		return -1;
 	}
@@ -1664,19 +1825,20 @@ vty_use_backup_config(char *fullpath)
 {
 	char *fullpath_sav, *fullpath_tmp;
 	FILE *ret = NULL;
-	struct stat buf;
 	int tmp, sav;
-	int c, retval;
+	int c, retval, len;
 	char buffer[512];
   
-	fullpath_sav = MALLOC(strlen(fullpath) + strlen (CONF_BACKUP_EXT) + 1);
-	strcpy(fullpath_sav, fullpath);
-	strcat(fullpath_sav, CONF_BACKUP_EXT);
-	if (stat (fullpath_sav, &buf) == -1) {
+	len = strlen(fullpath) + strlen(CONF_BACKUP_EXT) + 1;
+	fullpath_sav = MALLOC(len);
+	bsd_strlcpy(fullpath_sav, fullpath, len);
+	bsd_strlcat(fullpath_sav, CONF_BACKUP_EXT, len);
+	sav = open(fullpath_sav, O_RDONLY);
+	if (sav < 0) {
 		FREE(fullpath_sav);
 		return NULL;
 	}
-
+  
 	fullpath_tmp = MALLOC(strlen(fullpath) + 8);
 	sprintf(fullpath_tmp, "%s.XXXXXX", fullpath);
   
@@ -1685,26 +1847,23 @@ vty_use_backup_config(char *fullpath)
 	if (tmp < 0) {
 		FREE(fullpath_sav);
 		FREE(fullpath_tmp);
+		close(sav);
 		return NULL;
 	}
 
-	sav = open(fullpath_sav, O_RDONLY);
-	if (sav < 0) {
-		unlink(fullpath_tmp);
-		FREE(fullpath_sav);
-		FREE(fullpath_tmp);
-		return NULL;
-	}
-  
-	while((c = read(sav, buffer, 512)) > 0) {
-		retval = write(tmp, buffer, c);
-		if (retval < 0) {
-			unlink(fullpath_tmp);
-			FREE(fullpath_sav);
-			FREE(fullpath_tmp);
-			close(sav);
-			close(tmp);
-			return NULL;
+	while ((c = read(sav, buffer, 512)) > 0) {
+		int written = 0;
+		while (written < c) {
+			retval = write(tmp, buffer + written, c - written);
+			if (retval <= 0) {
+				unlink(fullpath_tmp);
+				FREE(fullpath_sav);
+				FREE(fullpath_tmp);
+				close(sav);
+				close(tmp);
+				return NULL;
+			}
+			written += retval;
 		}
 	}
   
@@ -1759,7 +1918,7 @@ vty_read_config(char *config_file, char *config_default_dir)
 		if (confp == NULL) {
 			log_message(LOG_ERR, "%s: failed to open configuration file %s: %s\n"
 					   , __func__, fullpath, strerror (errno));
-          
+
 			confp = vty_use_backup_config(fullpath);
 			if (confp) {
 				log_message(LOG_ERR, "WARNING: using backup configuration file!\n");
@@ -1775,7 +1934,7 @@ vty_read_config(char *config_file, char *config_default_dir)
 		if (confp == NULL) {
 			log_message(LOG_ERR, "%s: failed to open configuration file %s: %s\n"
 					   , __func__, config_default_dir, strerror(errno));
-          
+
 			confp = vty_use_backup_config(config_default_dir);
 			if (confp) {
 				log_message(LOG_ERR, "WARNING: using backup configuration file!\n");
@@ -1790,7 +1949,9 @@ vty_read_config(char *config_file, char *config_default_dir)
 		}
 	}
 
-	vty_read_file(confp);
+	if (vty_read_file(confp) < 0)
+		log_message(LOG_ERR, "%s: error loading configuration file"
+				   , fullpath);
 	fclose(confp);
 	host_config_set(fullpath);
 	FREE_PTR(tmp);
@@ -1798,7 +1959,7 @@ vty_read_config(char *config_file, char *config_default_dir)
 }
 
 int
-vty_config_lock(vty_t *vty)
+vty_config_lock(struct vty *vty)
 {
 	if (vty_config == 0) {
 		vty->config = 1;
@@ -1809,7 +1970,7 @@ vty_config_lock(vty_t *vty)
 }
 
 int
-vty_config_unlock(vty_t *vty)
+vty_config_unlock(struct vty *vty)
 {
 	if (vty_config == 1 && vty->config == 1) {
 		vty->config = 0;
@@ -1821,42 +1982,30 @@ vty_config_unlock(vty_t *vty)
 
 /* Master of the threads. */
 static void
-vty_event(thread_master_t *m, event_t event, int sock, void *arg)
+vty_event(struct thread_master *m, enum vty_event event, int sock, void *arg)
 {
-	thread_ref_t vty_serv_thread;
-	vty_t *vty;
+	struct thread *vty_serv_thread;
+	struct vty *vty;
 
 	switch (event) {
 	case VTY_SERV:
 		vty_serv_thread = thread_add_read(m, vty_accept, arg, sock,
-						  VTY_IO_TIMEOUT, 0);
+						  TIMER_NEVER, 0);
 		vector_set_index(Vvty_serv_thread, sock, vty_serv_thread);
 		break;
 
 	case VTY_READ:
-		vty = (vty_t *) arg;
-		vty->t_read = thread_add_read(m, vty_read, vty, sock, VTY_IO_TIMEOUT, 0);
-
+		vty = (struct vty *) arg;
+		vty->t_read = thread_add_read(m, vty_read, vty, sock,
+					      vty->v_timeout ? vty->v_timeout * TIMER_HZ : TIMER_NEVER,
+					      0);
 		break;
 
 	case VTY_WRITE:
-		vty = (vty_t *) arg;
+		vty = (struct vty *) arg;
 		if (!vty->t_write)
 			vty->t_write = thread_add_write(m, vty_flush, vty, sock,
 							VTY_IO_TIMEOUT, 0);
-		break;
-
-	case VTY_TIMEOUT_RESET:
-		vty = (vty_t *) arg;
-		if (vty->t_timeout) {
-			thread_cancel(vty->t_timeout);
-			vty->t_timeout = NULL;
-		}
-
-		if (vty->v_timeout) {
-			vty->t_timeout = thread_add_timer(m, vty_timeout, vty,
-							  vty->v_timeout*TIMER_HZ);
-		}
 		break;
 	}
 }
@@ -1868,7 +2017,7 @@ DEFUN(config_who,
 {
 	char ipaddr[INET6_ADDRSTRLEN];
 	unsigned int i;
-	vty_t *v;
+	struct vty *v;
 
 	for (i = 0; i < vector_active(vtyvec); i++) {
 		if ((v = vector_slot(vtyvec, i)) != NULL) {
@@ -1894,7 +2043,7 @@ DEFUN(line_vty,
 
 /* Set time out value. */
 static int
-exec_timeout(vty_t *vty, const char *min_str, const char *sec_str)
+exec_timeout(struct vty *vty, const char *min_str, const char *sec_str)
 {
 	unsigned long timeout = 0;
 
@@ -1911,8 +2060,11 @@ exec_timeout(vty_t *vty, const char *min_str, const char *sec_str)
 
 	vty_timeout_val = timeout;
 	vty->v_timeout = timeout;
-	if (vty->master)
-		vty_event(vty->master, VTY_TIMEOUT_RESET, 0, vty);
+	if (vty->master && vty->t_read) {
+		thread_del(vty->t_read);
+		vty->t_read = NULL;
+		vty_event(vty->master, VTY_READ, vty->fd, vty);
+	}
 
 	return CMD_SUCCESS;
 }
@@ -2013,9 +2165,10 @@ DEFUN(no_vty_line_listen,
 {
 	struct sockaddr_storage *vty_listen_addr;
 	struct sockaddr_storage addr;
-	thread_t *vty_serv_thread;
+	struct thread *vty_serv_thread;
 	uint16_t port = 0;
-	int ret, i;
+	unsigned int i;
+	int ret;
 
 	if (argc < 2) {
 		vty_out(vty, "%% missing arguments%s", VTY_NEWLINE);
@@ -2035,7 +2188,7 @@ DEFUN(no_vty_line_listen,
 		if ((vty_serv_thread = vector_slot(Vvty_serv_thread, i)) != NULL) {
 			vty_listen_addr = THREAD_ARG(vty_serv_thread);
 			if (memcmp(vty_listen_addr, &addr, sizeof(struct sockaddr_storage)) == 0) {
-				thread_cancel(vty_serv_thread);
+				thread_del(vty_serv_thread);
 				vector_slot(Vvty_serv_thread, i) = NULL;
 				log_message(LOG_INFO, "Vty stop listener on [%s]:%d"
 						    , inet_sockaddrtos(vty_listen_addr)
@@ -2044,6 +2197,79 @@ DEFUN(no_vty_line_listen,
 				close(i);
 			}
 		}
+	}
+
+	return CMD_SUCCESS;
+}
+
+DEFUN(vty_line_listen_unix,
+      vty_line_listen_unix_cmd,
+      "listen unix [path WORD] [owner WORD] [group WORD]",
+      "Launch unix socket listener\n"
+      "UNIX domain socket\n"
+      "Socket path\n"
+      "Socket path\n"
+      "Set socket owner\n"
+      "Username\n"
+      "Set socket group\n"
+      "Group name\n")
+{
+	const char *path = VTY_UNIX_PATH, *user = NULL, *group = NULL;
+	int ret, i;
+
+	for (i = 0; i < argc - 1; i++) {
+		if (!strcmp(argv[i], "path"))
+			path = argv[++i];
+		else if (!strcmp(argv[i], "owner"))
+			user = argv[++i];
+		else if (!strcmp(argv[i], "group"))
+			group = argv[++i];
+	}
+
+	ret = vty_listen_unix(master, path, user, group);
+	if (ret < 0) {
+		vty_out(vty, "%% Error starting vty unix listener%s", VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+
+	return CMD_SUCCESS;
+}
+
+DEFUN(no_vty_line_listen_unix,
+      no_vty_line_listen_unix_cmd,
+      "no listen unix [path WORD]",
+      NO_STR
+      "Stop unix socket listener\n"
+      "UNIX domain socket\n"
+      "Socket path\n"
+      "Socket path\n")
+{
+	const char *path = VTY_UNIX_PATH;
+	struct vty_unix_sock *usock;
+	struct thread *vty_serv_thread;
+	unsigned int i;
+
+	if (argc >= 2 && !strcmp(argv[0], "path"))
+		path = argv[1];
+
+	for (i = 0; i < vector_active(Vvty_serv_thread); i++) {
+		vty_serv_thread = vector_slot(Vvty_serv_thread, i);
+		if (!vty_serv_thread)
+			continue;
+		usock = THREAD_ARG(vty_serv_thread);
+		if (usock->addr.sun_family != AF_UNIX)
+			continue;
+		if (strcmp(usock->addr.sun_path, path) != 0)
+			continue;
+
+		thread_del(vty_serv_thread);
+		vector_slot(Vvty_serv_thread, i) = NULL;
+		log_message(LOG_INFO, "Vty stop unix listener on %s"
+				    , usock->addr.sun_path);
+		unlink(usock->addr.sun_path);
+		FREE(usock);
+		close(i);
+		break;
 	}
 
 	return CMD_SUCCESS;
@@ -2078,6 +2304,7 @@ DEFUN(terminal_monitor,
       "Copy debug output to the current terminal line\n")
 {
 	vty->monitor = 1;
+	vty_prompt_hold(vty);
 	return CMD_SUCCESS;
 }
 
@@ -2125,11 +2352,11 @@ DEFUN(show_history,
 
 /* Display current configuration. */
 static int
-vty_config_write(vty_t *vty)
+vty_config_write(struct vty *vty)
 {
 	struct sockaddr_storage *addr;
-	thread_t *vty_serv_thread;
-	int i;
+	struct thread *vty_serv_thread;
+	unsigned int i;
 
 	vty_out(vty, "line vty%s", VTY_NEWLINE);
 
@@ -2146,10 +2373,37 @@ vty_config_write(vty_t *vty)
 
 	/* Listener */
 	for (i = 0; i < vector_active(Vvty_serv_thread); i++) {
-		if ((vty_serv_thread = vector_slot(Vvty_serv_thread, i)) != NULL) {
-			addr = THREAD_ARG(vty_serv_thread);
+		struct sockaddr *sa;
+
+		vty_serv_thread = vector_slot(Vvty_serv_thread, i);
+		if (!vty_serv_thread)
+			continue;
+		sa = (struct sockaddr *)THREAD_ARG(vty_serv_thread);
+		if (sa->sa_family == AF_UNIX) {
+			struct vty_unix_sock *usock = THREAD_ARG(vty_serv_thread);
+			struct passwd *pw;
+			struct group *gr;
+
+			vty_out(vty, " listen unix");
+			if (strcmp(usock->addr.sun_path, VTY_UNIX_PATH))
+				vty_out(vty, " path %s"
+					   , usock->addr.sun_path);
+			if (usock->uid != (uid_t)-1) {
+				pw = getpwuid(usock->uid);
+				if (pw)
+					vty_out(vty, " owner %s", pw->pw_name);
+			}
+			if (usock->gid != (gid_t)-1) {
+				gr = getgrgid(usock->gid);
+				if (gr)
+					vty_out(vty, " group %s", gr->gr_name);
+			}
+			vty_out(vty, "%s", VTY_NEWLINE);
+		} else {
+			addr = (struct sockaddr_storage *)sa;
 			vty_out(vty, " listen %s %d%s"
-				   , inet_sockaddrtos(addr), ntohs(inet_sockaddrport(addr))
+				   , inet_sockaddrtos(addr)
+				   , ntohs(inet_sockaddrport(addr))
 				   , VTY_NEWLINE);
 		}
 	}
@@ -2159,8 +2413,8 @@ vty_config_write(vty_t *vty)
 	return CMD_SUCCESS;
 }
 
-static int vty_config_write(vty_t *vty);
-cmd_node_t vty_node = {
+static int vty_config_write(struct vty *vty);
+struct cmd_node vty_node = {
 	.node = VTY_NODE,
 	.parent_node = CONFIG_NODE,
 	.prompt = "%s(config-line)# ",
@@ -2172,8 +2426,8 @@ void
 vty_reset(void)
 {
 	unsigned int i;
-	vty_t *vty;
-	thread_t *vty_serv_thread;
+	struct vty *vty;
+	struct thread *vty_serv_thread;
 	struct sockaddr_storage *addr;
 
 	for (i = 0; i < vector_active(vtyvec); i++) {
@@ -2185,16 +2439,27 @@ vty_reset(void)
 	}
 
 	for (i = 0; i < vector_active(Vvty_serv_thread); i++) {
-		if ((vty_serv_thread = vector_slot(Vvty_serv_thread, i)) != NULL) {
-			addr = THREAD_ARG(vty_serv_thread);
-			thread_cancel(vty_serv_thread);
-			vector_slot(Vvty_serv_thread, i) = NULL;
+		struct sockaddr *sa;
+
+		vty_serv_thread = vector_slot(Vvty_serv_thread, i);
+		if (!vty_serv_thread)
+			continue;
+		sa = (struct sockaddr *)THREAD_ARG(vty_serv_thread);
+		thread_del(vty_serv_thread);
+		vector_slot(Vvty_serv_thread, i) = NULL;
+		if (sa->sa_family == AF_UNIX) {
+			struct vty_unix_sock *usock = (struct vty_unix_sock *)sa;
+			log_message(LOG_INFO, "Vty stop unix listener on %s"
+					    , usock->addr.sun_path);
+			unlink(usock->addr.sun_path);
+		} else {
+			addr = (struct sockaddr_storage *)sa;
 			log_message(LOG_INFO, "Vty stop listener on [%s]:%d"
 					    , inet_sockaddrtos(addr)
 					    , ntohs(inet_sockaddrport(addr)));
-			FREE(addr);
-			close(i);
 		}
+		FREE(sa);
+		close(i);
 	}
 
 	vty_timeout_val = VTY_TIMEOUT_DEFAULT;
@@ -2230,13 +2495,13 @@ vty_get_cwd(void)
 }
 
 int
-vty_shell(vty_t *vty)
+vty_shell(struct vty *vty)
 {
 	return vty->type == VTY_SHELL ? 1 : 0;
 }
 
 int
-vty_shell_serv(vty_t *vty)
+vty_shell_serv(struct vty *vty)
 {
 	return vty->type == VTY_SHELL_SERV ? 1 : 0;
 }
@@ -2276,6 +2541,8 @@ vty_init(void)
 	install_element(VTY_NODE, &no_vty_login_cmd);
 	install_element(VTY_NODE, &vty_line_listen_cmd);
 	install_element(VTY_NODE, &no_vty_line_listen_cmd);
+	install_element(VTY_NODE, &vty_line_listen_unix_cmd);
+	install_element(VTY_NODE, &no_vty_line_listen_unix_cmd);
 }
 
 void

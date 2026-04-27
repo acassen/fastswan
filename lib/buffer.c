@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <string.h>
 #include <errno.h>
 #include <sys/uio.h>
 
@@ -18,12 +19,12 @@
  * size.  If the argument is 0, the library will supply a reasonable
  * default size suitable for buffering socket I/O.
  */
-buffer_t *
+struct buffer *
 buffer_new(size_t size)
 {
-	buffer_t *b;
+	struct buffer *b;
 
-	b = (buffer_t *) MALLOC(sizeof(buffer_t));
+	b = (struct buffer *) MALLOC(sizeof(*b));
 
 	if (size) {
 		b->size = size;
@@ -41,7 +42,7 @@ buffer_new(size_t size)
 
 /* Free all data in the buffer. */
 void
-buffer_free(buffer_t *b)
+buffer_free(struct buffer *b)
 {
 	buffer_reset(b);
 	FREE(b);
@@ -53,10 +54,10 @@ buffer_free(buffer_t *b)
  * is still inside waiting to be flushed.
  */
 char *
-buffer_getstr(buffer_t *b)
+buffer_getstr(struct buffer *b)
 {
 	size_t totlen = 0;
-	buffer_data_t *data;
+	struct buffer_data *data;
 	char *s, *p;
 
 	for (data = b->head; data; data = data->next)
@@ -79,16 +80,16 @@ buffer_getstr(buffer_t *b)
  * Otherwise returns 0.
  */
 int
-buffer_empty(buffer_t *b)
+buffer_empty(struct buffer *b)
 {
 	return (b->head == NULL);
 }
 
 /* Clear and free all allocated data. */
 void
-buffer_reset(buffer_t *b)
+buffer_reset(struct buffer *b)
 {
-	buffer_data_t *data, *next;
+	struct buffer_data *data, *next;
 
 	for (data = b->head; data; data = next) {
 		next = data->next;
@@ -99,12 +100,12 @@ buffer_reset(buffer_t *b)
 }
 
 /* Add buffer_data to the end of buffer. */
-static buffer_data_t *
-buffer_add(buffer_t *b)
+static struct buffer_data *
+buffer_add(struct buffer *b)
 {
-	buffer_data_t *d;
+	struct buffer_data *d;
 
-	d = (buffer_data_t *) MALLOC(offsetof(buffer_data_t, data[b->size]));
+	d = (struct buffer_data *) MALLOC(offsetof(struct buffer_data, data[b->size]));
 	d->cp = d->sp = 0;
 	d->next = NULL;
 
@@ -119,9 +120,9 @@ buffer_add(buffer_t *b)
 
 /* Add the given data to the end of the buffer. */
 void
-buffer_put(buffer_t *b, const void *p, size_t size)
+buffer_put(struct buffer *b, const void *p, size_t size)
 {
-	buffer_data_t *data = b->tail;
+	struct buffer_data *data = b->tail;
 	const char *ptr = p;
 
 	/* We use even last one byte of data buffer. */
@@ -142,27 +143,57 @@ buffer_put(buffer_t *b, const void *p, size_t size)
 
 /* Add a single character to the end of the buffer. */
 void
-buffer_putc(buffer_t *b, uint8_t c)
+buffer_putc(struct buffer *b, uint8_t c)
 {
 	buffer_put(b, &c, 1);
 }
 
 /* Add a NUL-terminated string to the end of the buffer. */
 void
-buffer_putstr(buffer_t *b, const char *c)
+buffer_putstr(struct buffer *b, const char *c)
 {
 	buffer_put(b, c, strlen(c));
+}
+
+/* Try to write this data to the file descriptor.
+ * Any data that cannot be written immediately is added to
+ * the buffer queue.
+ */
+enum buffer_status
+buffer_write(struct buffer *b, int fd, const void *p, size_t size)
+{
+	ssize_t nbytes;
+	size_t written;
+
+	/* Buffer is not empty, so do not attempt to write the new data. */
+	if (b->head) {
+		nbytes = 0;
+	} else if ((nbytes = write(fd, p, size)) < 0) {
+		if (ERRNO_IO_RETRY(errno)) {
+			nbytes = 0;
+		} else {
+			return BUFFER_ERROR;
+		}
+	}
+
+	/* Add any remaining data to the buffer. */
+	written = nbytes;
+	if (written < size) {
+		buffer_put(b, ((const char *)p)+written, size-written);
+	}
+
+	return b->head ? BUFFER_PENDING : BUFFER_EMPTY;
 }
 
 /* Call buffer_flush_available repeatedly until either all data has been
  * flushed, or an I/O error has been encountered, or the operation would
  * block.
  */
-buffer_status_t
-buffer_flush_all(buffer_t *b, int fd)
+enum buffer_status
+buffer_flush_all(struct buffer *b, int fd)
 {
- 	buffer_status_t ret;
-	buffer_data_t *head;
+ 	enum buffer_status ret;
+	struct buffer_data *head;
 	size_t head_sp;
 
 	if (!b->head)
@@ -193,8 +224,8 @@ buffer_flush_all(buffer_t *b, int fd)
  * to return -1 (because the logic for handling the erase and more features
  * is too complicated to retry the write later).
  */
-buffer_status_t
-buffer_flush_window(buffer_t *b, int fd, int width, int height,
+enum buffer_status
+buffer_flush_window(struct buffer *b, int fd, int width, int height,
                     int erase_flag, int no_more_flag)
 {
 	int nbytes = 0, iov_alloc, iov_index, column;
@@ -204,7 +235,7 @@ buffer_flush_window(buffer_t *b, int fd, int width, int height,
 	char erase[] = { 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08,
 			 ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',
 			 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08};
-	buffer_data_t *data;
+	struct buffer_data *data;
 
 	if (!b->head)
 		return BUFFER_EMPTY;
@@ -243,11 +274,33 @@ buffer_flush_window(buffer_t *b, int fd, int width, int height,
 
 		cp = data->sp;
 		while ((cp < data->cp) && (height > 0)) {
-			/* Calculate lines remaining and column position after displaying
-			 * this character. */
-			if (data->data[cp] == '\r') {
+			unsigned char c = (unsigned char)data->data[cp];
+
+			/* Skip ANSI/VT CSI escape sequences: ESC [ params final.
+			 * These are invisible and must not count as columns. */
+			if (c == '\033') {
+				cp++;
+				if (cp < data->cp && (unsigned char)data->data[cp] == '[') {
+					cp++;
+					while (cp < data->cp) {
+						unsigned char fc = (unsigned char)data->data[cp++];
+						if (fc >= 0x40 && fc <= 0x7e)
+							break; /* final byte */
+					}
+				}
+				continue;
+			}
+
+			/* Skip UTF-8 multi-byte continuation bytes (0x80-0xBF).
+			 * Only the lead byte counts as one column. */
+			if (c >= 0x80 && c < 0xc0) {
+				cp++;
+				continue;
+			}
+
+			if (c == '\r') {
 				column = 1;
-			} else if ((data->data[cp] == '\n') || (column == width)) {
+			} else if (c == '\n' || column == width) {
 				column = 1;
 				height--;
 			} else {
@@ -307,7 +360,7 @@ buffer_flush_window(buffer_t *b, int fd, int width, int height,
 
 	/* Free printed buffer data. */
 	while (b->head && (b->head->sp == b->head->cp)) {
-		buffer_data_t *del;
+		struct buffer_data *del;
 		if (!(b->head = (del = b->head)->next))
 			b->tail = NULL;
 		FREE(del);
@@ -326,8 +379,8 @@ buffer_flush_window(buffer_t *b, int fd, int width, int height,
  * able to empty out the buffers completely, 1 if more flushing is
  * required later, or -1 on a fatal write error.
  */
-buffer_status_t
-buffer_flush_available(buffer_t *b, int fd)
+enum buffer_status
+buffer_flush_available(struct buffer *b, int fd)
 {
 /* These are just reasonable values to make sure a significant amount of
  * data is written.  There's no need to go crazy and try to write it all
@@ -339,7 +392,7 @@ buffer_flush_available(buffer_t *b, int fd)
 #endif
 #define MAX_FLUSH 131072
 
-	buffer_data_t *d;
+	struct buffer_data *d;
 	size_t written;
 	struct iovec iov[MAX_CHUNKS];
 	size_t iovcnt = 0, nbytes = 0;
@@ -364,7 +417,7 @@ buffer_flush_available(buffer_t *b, int fd)
 
 	/* Free printed buffer data. */
 	while (written > 0) {
-		buffer_data_t *d;
+		struct buffer_data *d;
 		if (!(d = b->head))
 			break;
 		if (written < d->cp-d->sp) {
@@ -382,34 +435,4 @@ buffer_flush_available(buffer_t *b, int fd)
 
 #undef MAX_CHUNKS
 #undef MAX_FLUSH
-}
-
-/* Try to write this data to the file descriptor.
- * Any data that cannot be written immediately is added to
- * the buffer queue.
- */
-buffer_status_t
-buffer_write(buffer_t *b, int fd, const void *p, size_t size)
-{
-	ssize_t nbytes;
-	size_t written;
-
-	/* Buffer is not empty, so do not attempt to write the new data. */
-	if (b->head) {
-		nbytes = 0;
-	} else if ((nbytes = write(fd, p, size)) < 0) {
-		if (ERRNO_IO_RETRY(errno)) {
-			nbytes = 0;
-		} else {
-			return BUFFER_ERROR;
-		}
-	}
-
-	/* Add any remaining data to the buffer. */
-	written = nbytes;
-	if (written < size) {
-		buffer_put(b, ((const char *)p)+written, size-written);
-	}
-
-	return b->head ? BUFFER_PENDING : BUFFER_EMPTY;
 }

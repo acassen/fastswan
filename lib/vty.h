@@ -2,49 +2,52 @@
 /* Virtual terminal [aka TeletYpe] interface routine
  * Copyright (C) 1997 Kunihiro Ishiguro
  */
+#pragma once
 
-#ifndef _VTY_H
-#define _VTY_H
-
+#include <stdlib.h>
+#include <errno.h>
 #include <netinet/in.h>
+#include <sys/un.h>
+#include <pwd.h>
+#include <grp.h>
 #include "timer.h"
-#include "scheduler.h"
+#include "thread.h"
 #include "buffer.h"
 
 #define VTY_BUFSIZ 512
+#define VTY_MAX_BUFSIZ (64 * 1024)	/* hard cap on input line length */
 #define VTY_MAXHIST 20
 #define TELNET_NAWS_SB_LEN 5
 
-typedef enum _event {
+enum vty_event {
 	VTY_SERV,
 	VTY_READ,
 	VTY_WRITE,
-	VTY_TIMEOUT_RESET
-} event_t;
+};
 
-typedef enum _vty_type {
+enum vty_type {
 	VTY_TERM,
 	VTY_FILE,
 	VTY_SHELL,
 	VTY_SHELL_SERV
-} vty_type_t;
+};
 
-typedef enum _vty_status {
+enum vty_status {
 	VTY_NORMAL,
 	VTY_CLOSE,
 	VTY_MORE,
 	VTY_MORELINE,
 	VTY_HOLD
-} vty_status_t;
+};
 
 
 /* VTY struct. */
-typedef struct _vty {
+struct vty {
 	int			fd;				/* File descripter of this vty. */
-	vty_type_t		type;				/* Is this vty connect to file or not */
+	enum vty_type		type;				/* Is this vty connect to file or not */
 	int			node;				/* Node status of this vty */
 	int			fail;				/* Failure count */
-	buffer_t		*obuf;				/* Output buffer */
+	struct buffer		*obuf;				/* Output buffer */
 	char			*buf;				/* Command input buffer */
 	int			cp;				/* Command cursor point */
 	int			length;				/* Command length */
@@ -57,7 +60,7 @@ typedef struct _vty {
 								 * as key chain and key.
 								 */
 	unsigned char		escape;				/* For escape character. */
-	vty_status_t		status;				/* Current vty status. */
+	enum vty_status		status;				/* Current vty status. */
 	unsigned char		iac;				/* IAC handling: was the last character received
 								 * the IAC (interpret-as-command) escape character
 								 * (and therefore the next character will be the
@@ -78,13 +81,13 @@ typedef struct _vty {
 	int			lines;				/* Configure lines */
 	int			monitor;			/* Terminal monitor */
 	int			config;				/* In configure mode */
-	thread_master_t		*master;			/* Master thread */
-	thread_ref_t		t_read;				/* Read thread */
-	thread_ref_t		t_write;			/* Write thread */
+	struct thread_master	*master;			/* Master thread */
+	struct thread		*t_read;			/* Read thread */
+	struct thread		*t_write;			/* Write thread */
 	unsigned long		v_timeout;			/* Timeout seconds */
-	thread_ref_t		t_timeout;			/* Timeout thread */
 	struct sockaddr_storage	address;			/* What address is this vty comming from. */
-} vty_t;
+	void			*priv;				/* Per-session private data */
+};
 
 /* Small macro to determine newline is newline only or linefeed needed. */
 #define VTY_NEWLINE	((vty->type == VTY_TERM) ? "\r\n" : "\n")
@@ -133,6 +136,19 @@ do {									\
 #define VTY_GET_INTEGER(NAME,V,STR) \
 	VTY_GET_INTEGER_RANGE(NAME,V,STR,0U,UINT32_MAX)
 
+#define VTY_GET_UINT32(NAME,V,STR)					\
+do {									\
+  char *endptr = NULL;							\
+  unsigned long tmpl;							\
+  errno = 0;								\
+  tmpl = strtoul((STR), &endptr, 0);					\
+  if (*(STR) == '-' || *endptr != '\0' || errno || tmpl > UINT32_MAX) { \
+      vty_out(vty, "%% Invalid %s value%s", NAME, VTY_NEWLINE);		\
+      return CMD_WARNING;						\
+    }									\
+  (V) = (uint32_t)tmpl;							\
+} while (0)
+
 #define VTY_GET_IPV4_ADDRESS(NAME,V,STR)				\
 do {									\
   int retv;								\
@@ -153,29 +169,34 @@ do {									\
     }									\
 } while (0)
 
-/* Exported variables */
-extern char integrate_default[];
+
+/* Unix domain socket context */
+struct vty_unix_sock {
+	struct sockaddr_un addr;	/* must be first for sockaddr cast */
+	uid_t uid;
+	gid_t gid;
+};
 
 /* Prototypes. */
-extern void vty_init(void);
-extern void vty_terminate(void);
-extern int vty_listen(thread_master_t *, struct sockaddr_storage *);
-extern void vty_reset(void);
-extern vty_t *vty_new(void);
-extern int vty_out(vty_t *, const char *, ...) PRINTF_ATTRIBUTE(2, 3);
-extern ssize_t vty_send_out(vty_t *, const char *, ...) PRINTF_ATTRIBUTE(2, 3);
-extern void vty_prompt_hold(vty_t *);
-extern void vty_prompt_restore(vty_t *);
-extern int vty_read_config(char *, char *);
-extern void vty_time_print(vty_t *, int);
-extern void vty_serv_sock(const char *, unsigned short, const char *);
-extern void vty_close(vty_t *);
-extern char *vty_get_cwd(void);
-extern int vty_config_lock(vty_t *);
-extern int vty_config_unlock(vty_t *);
-extern int vty_shell(vty_t *);
-extern int vty_shell_serv(vty_t *);
-extern void vty_time_print(vty_t *, int);
-extern void vty_hello(vty_t *);
-
-#endif
+void vty_init(void);
+void vty_terminate(void);
+int vty_listen(struct thread_master *m, struct sockaddr_storage *addr);
+int vty_listen_unix(struct thread_master *m, const char *path,
+		    const char *user, const char *group);
+void vty_reset(void);
+struct vty *vty_new(void);
+int vty_out(struct vty *vty, const char *fmt, ...) PRINTF_ATTRIBUTE(2, 3);
+int vty_brd_out(const char *fmt, ...);
+ssize_t vty_send_out(struct vty *vty, const char *fmt, ...) PRINTF_ATTRIBUTE(2, 3);
+void vty_prompt_hold(struct vty *vty);
+void vty_prompt_restore(struct vty *vty);
+void vty_read_resume(struct vty *vty);
+int vty_read_config(char *config_file, char *config_default_dir);
+void vty_time_print(struct vty *vty, int cr);
+void vty_close(struct vty *vty);
+char *vty_get_cwd(void);
+int vty_config_lock(struct vty *vty);
+int vty_config_unlock(struct vty *vty);
+int vty_shell(struct vty *vty);
+int vty_shell_serv(struct vty *vty);
+void vty_hello(struct vty *vty);

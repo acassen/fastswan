@@ -27,8 +27,9 @@
  * SUCH DAMAGE.
  */
 
-#ifndef _MD5_H_
-#define _MD5_H_
+#pragma once
+
+#include <stdint.h>
 
 #define MD5_BUFLEN	64
 
@@ -46,19 +47,19 @@ typedef struct {
 
 	union {
 		uint64_t	md5_count64;
-		uint8_t	md5_count8[8];
+		uint8_t		md5_count8[8];
 	} md5_count;
 #define md5_n	md5_count.md5_count64
 #define md5_n8	md5_count.md5_count8
 
-	uint	md5_i;
-	uint8_t	md5_buf[MD5_BUFLEN];
+	unsigned int		md5_i;
+	uint8_t			md5_buf[MD5_BUFLEN];
 } md5_ctxt;
 
-extern void md5_init (md5_ctxt *);
-extern void md5_loop (md5_ctxt *, const void *, u_int);
-extern void md5_pad (md5_ctxt *);
-extern void md5_result (uint8_t *, md5_ctxt *);
+void md5_init(md5_ctxt *ctxt);
+void md5_loop(md5_ctxt *ctxt, const void *vinput, unsigned int len);
+void md5_pad(md5_ctxt *ctxt);
+void md5_result(uint8_t *digest, md5_ctxt *ctxt);
 
 /* compatibility */
 #define MD5_CTX		md5_ctxt
@@ -69,5 +70,3 @@ do {				\
 	md5_pad((y));		\
 	md5_result((x), (y));	\
 } while (0)
-
-#endif

@@ -6,7 +6,7 @@
  *              mode, all IPSEC ESP operations are done by the hardware to
  *              offload the kernel for crypto and packet handling. To further
  *              increase perfs we implement kernel routing offload via XDP.
- *              A XFRM kernel netlink reflector is dynamically andi
+ *              A XFRM kernel netlink reflector is dynamically and
  *              transparently mirroring kernel XFRM policies to the XDP layer
  *              for kernel netstack bypass. fastSwan is an XFRM offload feature.
  *
@@ -18,18 +18,12 @@
  *              either version 3.0 of the License, or (at your option) any later
  *              version.
  *
- * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
 
-#ifndef _RBTREE_API_H
-#define _RBTREE_API_H
+#pragma once
 
 #include "rbtree.h"
-
-typedef struct rb_node rb_node_t;
-typedef struct rb_root rb_root_t;
-typedef struct rb_root_cached rb_root_cached_t;
-
 
 /**
  * rb_for_each_entry -  Iterate over rbtree of given type
@@ -89,7 +83,7 @@ static __always_inline void
 rb_move_cached(struct rb_node *node, struct rb_root_cached *tree,
 	       bool (*less)(struct rb_node *, const struct rb_node *))
 {
-	rb_node_t *prev_node, *next_node;
+	struct rb_node *prev_node, *next_node;
 
 	prev_node = rb_prev(node);
 	next_node = rb_next(node);
@@ -105,5 +99,3 @@ rb_move_cached(struct rb_node *node, struct rb_root_cached *tree,
 		}
 	}
 }
-
-#endif	/* _LINUX_RBTREE_H */

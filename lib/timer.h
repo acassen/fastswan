@@ -6,7 +6,7 @@
  *              mode, all IPSEC ESP operations are done by the hardware to
  *              offload the kernel for crypto and packet handling. To further
  *              increase perfs we implement kernel routing offload via XDP.
- *              A XFRM kernel netlink reflector is dynamically andi
+ *              A XFRM kernel netlink reflector is dynamically and
  *              transparently mirroring kernel XFRM policies to the XDP layer
  *              for kernel netstack bypass. fastSwan is an XFRM offload feature.
  *
@@ -18,16 +18,16 @@
  *              either version 3.0 of the License, or (at your option) any later
  *              version.
  *
- * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
+#pragma once
 
-#ifndef _TIMER_H
-#define _TIMER_H
-
-#include <sys/time.h>
-#include <limits.h>
-#include <string.h>
+#include <stdint.h>
 #include <stdbool.h>
+#include <limits.h>
+#include <sys/time.h>
+
+#include "rbtree.h"
 
 typedef struct timeval timeval_t;
 
@@ -51,44 +51,44 @@ extern timeval_t time_now;
 #define set_time_now()	set_time_now_r((__FILE__), (__func__), (__LINE__))
 #endif
 
-#define RB_TIMER_CMP(obj, nnn)					\
-static inline int						\
-obj##_timer_cmp(const timeval_t *sands, const rb_node_t *a)	\
-{								\
-	const obj##_t *r1 = rb_entry_const(a, obj##_t, nnn);	\
-								\
-	if (sands->tv_sec == TIMER_DISABLED) {			\
-		if (r1->sands.tv_sec == TIMER_DISABLED)		\
-			return 0;				\
-		return 1;					\
-	}							\
-								\
-	if (r1->sands.tv_sec == TIMER_DISABLED)			\
-		return -1;					\
-								\
-	if (sands->tv_sec != r1->sands.tv_sec)			\
-		return sands->tv_sec - r1->sands.tv_sec;	\
-								\
-	return sands->tv_usec - r1->sands.tv_usec;		\
+#define RB_TIMER_CMP(obj, nnn)						\
+static inline int							\
+obj##_timer_cmp(const timeval_t *sands, const struct rb_node *a)	\
+{									\
+	const struct obj *r1 = rb_entry_const(a, struct obj, nnn);	\
+									\
+	if (sands->tv_sec == TIMER_DISABLED) {				\
+		if (r1->sands.tv_sec == TIMER_DISABLED)			\
+			return 0;					\
+		return 1;						\
+	}								\
+									\
+	if (r1->sands.tv_sec == TIMER_DISABLED)				\
+		return -1;						\
+									\
+	if (sands->tv_sec != r1->sands.tv_sec)				\
+		return sands->tv_sec - r1->sands.tv_sec;		\
+									\
+	return sands->tv_usec - r1->sands.tv_usec;			\
 }
 
-#define RB_TIMER_LESS(obj, nnn)					\
-static inline bool						\
-obj##_timer_less(rb_node_t *a, const rb_node_t *b)		\
-{								\
-	const obj##_t *r1 = rb_entry_const(a, obj##_t, nnn);	\
-	const obj##_t *r2 = rb_entry_const(b, obj##_t, nnn);	\
-								\
-	if (r1->sands.tv_sec == TIMER_DISABLED)			\
-		return false;					\
-								\
-	if (r2->sands.tv_sec == TIMER_DISABLED)			\
-		return true;					\
-								\
-	if (r1->sands.tv_sec != r2->sands.tv_sec)		\
-		return r1->sands.tv_sec < r2->sands.tv_sec;	\
-								\
-	return r1->sands.tv_usec < r2->sands.tv_usec;		\
+#define RB_TIMER_LESS(obj, nnn)						\
+static inline bool							\
+obj##_timer_less(struct rb_node *a, const struct rb_node *b)		\
+{									\
+	const struct obj *r1 = rb_entry_const(a, struct obj, nnn);	\
+	const struct obj *r2 = rb_entry_const(b, struct obj, nnn);	\
+									\
+	if (r1->sands.tv_sec == TIMER_DISABLED)				\
+		return false;						\
+									\
+	if (r2->sands.tv_sec == TIMER_DISABLED)				\
+		return true;						\
+									\
+	if (r1->sands.tv_sec != r2->sands.tv_sec)			\
+		return r1->sands.tv_sec < r2->sands.tv_sec;		\
+									\
+	return r1->sands.tv_usec < r2->sands.tv_usec;			\
 }
 
 /* timer sub from current time */
@@ -138,10 +138,11 @@ timer_long(timeval_t a)
 }
 
 /* prototypes */
-extern timeval_t timer_now(void);
-extern timeval_t set_time_now(void);
-extern struct tm *time_now_to_calendar(struct tm *);
-extern timeval_t timer_add_long(timeval_t, unsigned long) __attribute__((const));
-extern timeval_t timer_sub_long(timeval_t, unsigned long) __attribute__((const));
-
-#endif
+int monotonic_gettimeofday(timeval_t *now);
+void timespec_add_now_ms(struct timespec *t, timeval_t *now, unsigned long ms);
+timeval_t timer_now(void);
+timeval_t set_time_now(void);
+struct tm *time_now_to_calendar(struct tm *t);
+uint32_t time_now_to_ntp(void);
+timeval_t timer_add_ll(timeval_t a, uint64_t b) __attribute__((const));
+timeval_t timer_sub_ll(timeval_t a, uint64_t b) __attribute__((const));

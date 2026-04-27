@@ -3,11 +3,11 @@
  * Copyright (C) 1997 Kunihiro Ishiguro
  */
 
-#include <time.h>
-#include <ctype.h>
-#include <syslog.h>
+#include <string.h>
+#include <arpa/inet.h>
+
 #include "memory.h"
-#include "utils.h"
+#include "inet_utils.h"
 #include "prefix.h"
 
 /* Maskbit. */
@@ -25,7 +25,7 @@ static const uint8_t maskbit[] = {0x00, 0x80, 0xc0, 0xe0, 0xf0, 0xf8, 0xfc, 0xfe
  *	If n includes p prefix then return 1 else return 0.
  */
 int
-prefix_match(const prefix_t *n, const prefix_t *p)
+prefix_match(const struct prefix *n, const struct prefix *p)
 {
 	int offset;
 	int shift;
@@ -61,15 +61,15 @@ prefix_match(const prefix_t *n, const prefix_t *p)
  *	Copy prefix from src to dest.
  */
 int
-prefix_copy(prefix_t *dest, const prefix_t *src)
+prefix_copy(struct prefix *dst, const struct prefix *src)
 {
-	dest->family = src->family;
-	dest->prefixlen = src->prefixlen;
+	dst->family = src->family;
+	dst->prefixlen = src->prefixlen;
 
 	if (src->family == AF_INET) {
-		dest->u.prefix4 = src->u.prefix4;
+		dst->u.prefix4 = src->u.prefix4;
 	} else if (src->family == AF_INET6) {
-		dest->u.prefix6 = src->u.prefix6;
+		dst->u.prefix6 = src->u.prefix6;
 	} else {
 		return -1;
 	}
@@ -82,7 +82,7 @@ prefix_copy(prefix_t *dest, const prefix_t *src)
  *	Convert a string to a prefix
  */
 int
-str2prefix_ipv4(const char *str, prefix_ipv4_t *p)
+str2prefix_ipv4(const char *str, struct prefix_ipv4 *p)
 {
 	int ret, plen;
 	char *pnt, *cp;
@@ -95,12 +95,12 @@ str2prefix_ipv4(const char *str, prefix_ipv4_t *p)
 		/* Convert string to prefix. */
 		ret = inet_aton(str, &p->prefix);
 		if (ret == 0)
-			return 0;
+			return -1;
 
 		/* If address doesn't contain slash we assume it host address. */
 		p->prefixlen = IPV4_MAX_BITLEN;
 
-		return ret;
+		return 0;
 	} else {
 		cp = MALLOC((pnt - str) + 1);
 		strncpy(cp, str, pnt - str);
@@ -111,18 +111,18 @@ str2prefix_ipv4(const char *str, prefix_ipv4_t *p)
 		/* Get prefix length. */
 		plen = (u_char) atoi(++pnt);
 		if (plen > IPV4_MAX_PREFIXLEN)
-			return 0;
+			return -1;
 
 		p->prefixlen = plen;
 	}
 
 	p->family = AF_INET;
 
-	return ret;
+	return ret ? 0 : -1;
 }
 
 int
-str2prefix_ipv6(const char *str, prefix_ipv6_t *p)
+str2prefix_ipv6(const char *str, struct prefix_ipv6 *p)
 {
 	int ret, plen;
 	char *pnt, *cp;
@@ -133,7 +133,7 @@ str2prefix_ipv6(const char *str, prefix_ipv6_t *p)
 	if (pnt == NULL) {
 		ret = inet_pton(AF_INET6, str, &p->prefix);
 		if (ret == 0)
-			return 0;
+			return -1;
 		p->prefixlen = IPV6_MAX_BITLEN;
 	} else {
 		cp = MALLOC((pnt - str) + 1);
@@ -142,47 +142,43 @@ str2prefix_ipv6(const char *str, prefix_ipv6_t *p)
 		ret = inet_pton(AF_INET6, cp, &p->prefix);
 		FREE(cp);
 		if (ret == 0)
-			return 0;
+			return -1;
 		plen = (u_char)atoi (++pnt);
 		if (plen > 128)
-			return 0;
+			return -1;
 		p->prefixlen = plen;
 	}
 
 	p->family = AF_INET6;
 
-	return ret;
+	return ret ? 0 : -1;
 }
 
 int
-str2prefix(const char *str, prefix_t *p)
+str2prefix(const char *str, struct prefix *p)
 {
-	int ret;
+	int err;
 
 	/* First we try to convert string to struct prefix_ipv4. */
-	ret = str2prefix_ipv4(str, (prefix_ipv4_t *) p);
-	if (ret)
-		return ret;
+	err = str2prefix_ipv4(str, (struct prefix_ipv4 *) p);
+	if (!err)
+		return 0;
 
 	/* Next we try to convert string to struct prefix_ipv6. */
-	ret = str2prefix_ipv6(str, (prefix_ipv6_t *) p);
-	if (ret)
-		return ret;
-
-	return 0;
+	return str2prefix_ipv6(str, (struct prefix_ipv6 *) p);
 }
 
 /*
  *	Convert bytes to prefix
  */
 int
-ip2prefix_ipv4(const uint32_t ip_address, prefix_t *p)
+ip2prefix_ipv4(const uint32_t addr, struct prefix *p)
 {
-	prefix_ipv4_t *prefix_ipv4 = (prefix_ipv4_t *) p;
+	struct prefix_ipv4 *prefix_ipv4 = (struct prefix_ipv4 *) p;
 
 	prefix_ipv4->family = AF_INET;
 	prefix_ipv4->prefixlen = IPV4_MAX_BITLEN;
-	prefix_ipv4->prefix.s_addr = ip_address;
+	prefix_ipv4->prefix.s_addr = addr;
 
 	return 0;
 }
@@ -191,23 +187,23 @@ ip2prefix_ipv4(const uint32_t ip_address, prefix_t *p)
 /*
  *	Prefix alloc
  */
-prefix_t *
+struct prefix *
 prefix_alloc(void)
 {
-	prefix_t *p = (prefix_t *) MALLOC(sizeof(prefix_t));
+	struct prefix *p = (struct prefix *) MALLOC(sizeof(*p));
 	return p;
 }
 
 void
-prefix_free(prefix_t *p)
+prefix_free(struct prefix *p)
 {
 	FREE(p);
 }
 
 void
-prefix_dump(prefix_t *p)
+prefix_dump(struct prefix *p)
 {
-	syslog(LOG_INFO, "prefix : %u.%u.%u.%u/%d"
-		       , NIPQUAD(p->u.prefix4.s_addr)
-		       , p->prefixlen);
+	printf("prefix : %u.%u.%u.%u/%d\n"
+	       , NIPQUAD(p->u.prefix4.s_addr)
+	       , p->prefixlen);
 }

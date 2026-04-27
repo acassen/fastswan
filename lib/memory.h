@@ -6,7 +6,7 @@
  *              mode, all IPSEC ESP operations are done by the hardware to
  *              offload the kernel for crypto and packet handling. To further
  *              increase perfs we implement kernel routing offload via XDP.
- *              A XFRM kernel netlink reflector is dynamically andi
+ *              A XFRM kernel netlink reflector is dynamically and
  *              transparently mirroring kernel XFRM policies to the XDP layer
  *              for kernel netstack bypass. fastSwan is an XFRM offload feature.
  *
@@ -18,25 +18,19 @@
  *              either version 3.0 of the License, or (at your option) any later
  *              version.
  *
- * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
 
-#ifndef _MEMORY_H
-#define _MEMORY_H
+#pragma once
 
-/* system includes */
-#include <stdio.h>
-#include <stdint.h>
 #include <stdlib.h>
-#include <string.h>
-#include <assert.h>
 
 /* extern types */
 extern unsigned long mem_allocated;
-extern void *xalloc(unsigned long);
-extern void *zalloc(unsigned long);
-extern void *xcalloc(size_t, unsigned long);
-extern void xfree(void *);
+void *xalloc(unsigned long size);
+void *zalloc(unsigned long size);
+void *xcalloc(size_t nmemb, unsigned long size);
+void xfree(void *p);
 
 /* Global alloc macro */
 #define ALLOC(n) (xalloc(n))
@@ -72,5 +66,3 @@ extern void memory_free_final(char *);
 #define PMALLOC(p)	{ p = MALLOC(sizeof(*p)); }
 #define FREE_PTR(p)     { if (p) { FREE(p);} }
 #define FREE_CONST_PTR(p) { if (p) { FREE_CONST(p);} }
-
-#endif

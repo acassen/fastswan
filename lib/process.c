@@ -6,7 +6,7 @@
  *              mode, all IPSEC ESP operations are done by the hardware to
  *              offload the kernel for crypto and packet handling. To further
  *              increase perfs we implement kernel routing offload via XDP.
- *              A XFRM kernel netlink reflector is dynamically andi
+ *              A XFRM kernel netlink reflector is dynamically and
  *              transparently mirroring kernel XFRM policies to the XDP layer
  *              for kernel netstack bypass. fastSwan is an XFRM offload feature.
  *
@@ -18,21 +18,14 @@
  *              either version 3.0 of the License, or (at your option) any later
  *              version.
  *
- * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
 
-#include "config.h"
-
-#include <sys/mman.h>
-#include <sys/resource.h>
-#ifndef RLIMIT_RTTIME
-/* musl was very late defining RLIMIT_RTTIME, not until v1.20 */
-#define RLIMIT_RTTIME	15
-#endif
-#include <errno.h>
-#include <string.h>
 #include <unistd.h>
-#include <stdbool.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/param.h>
+#include <errno.h>
 
 #include "process.h"
 #include "utils.h"

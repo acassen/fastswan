@@ -6,7 +6,7 @@
  *              mode, all IPSEC ESP operations are done by the hardware to
  *              offload the kernel for crypto and packet handling. To further
  *              increase perfs we implement kernel routing offload via XDP.
- *              A XFRM kernel netlink reflector is dynamically andi
+ *              A XFRM kernel netlink reflector is dynamically and
  *              transparently mirroring kernel XFRM policies to the XDP layer
  *              for kernel netstack bypass. fastSwan is an XFRM offload feature.
  *
@@ -18,123 +18,120 @@
  *              either version 3.0 of the License, or (at your option) any later
  *              version.
  *
- * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
 
-#ifndef _PKT_BUFFER_H
-#define _PKT_BUFFER_H
+#pragma once
+
+#include <pthread.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include "list_head.h"
 
 /* defines */
-#define DEFAULT_PKT_BUFFER_SIZE	4096
+#define DEFAULT_PKT_BUFFER_SIZE	4064
+#define DEFAULT_PKT_QUEUE_SIZE	128
 
 /* pkt related */
-typedef struct _pkt_buffer {
-	unsigned char		*head,
-				*data;
+struct pkt_buffer {
+	unsigned char		*data;
 	unsigned char		*end;
 	unsigned char		*tail;
-} pkt_buffer_t;
+	unsigned char		head[];
+};
 
-typedef struct _pkt {
-	pkt_buffer_t		*pbuff;
+struct pkt {
+	struct pkt_buffer	*pbuff;
 
-	list_head_t		next;
-} pkt_t;
+	struct list_head	next;
+};
 
-typedef struct _mpkt {
+struct mpkt {
 	unsigned int		vlen;
 	struct mmsghdr		*msgs;
 	struct iovec		*iovecs;
-	pkt_t			**pkt;
-} mpkt_t;
+	struct pkt		**pkt;
+};
 
-typedef struct _pkt_queue {
+struct pkt_queue {
 	pthread_mutex_t		mutex;
-	list_head_t		queue;
-} pkt_queue_t;
+	struct list_head	queue;
+	int			size;
+	int			max_size;
+};
 
-static inline unsigned int pkt_buffer_len(pkt_buffer_t *b)
+static inline unsigned int pkt_buffer_len(struct pkt_buffer *b)
 {
 	return b->end - b->head;
 }
 
-static inline unsigned int pkt_buffer_size(pkt_buffer_t *b)
+static inline unsigned int pkt_buffer_size(struct pkt_buffer *b)
 {
 	return b->tail - b->head;
 }
 
-static inline unsigned int pkt_buffer_headroom(pkt_buffer_t *b)
+static inline unsigned int pkt_buffer_headroom(struct pkt_buffer *b)
 {
 	return b->data - b->head;
 }
 
-static inline unsigned int pkt_buffer_tailroom(pkt_buffer_t *b)
+static inline unsigned int pkt_buffer_tailroom(struct pkt_buffer *b)
 {
 	return b->tail - b->end;
 }
 
-static inline unsigned int pkt_buffer_data_tailroom(pkt_buffer_t *b)
-{
-	return b->end - b->data;
-}
-
-static inline unsigned char *pkt_buffer_end(pkt_buffer_t *b)
+static inline unsigned char *pkt_buffer_end(struct pkt_buffer *b)
 {
 	return b->end;
 }
 
-static inline void pkt_buffer_reset(pkt_buffer_t *b)
+static inline void pkt_buffer_reset(struct pkt_buffer *b)
 {
 	b->data = b->end = b->head;
 }
 
-static inline void pkt_buffer_reset_data(pkt_buffer_t *b)
-{
-	b->data = b->head;
-}
-
-static inline void pkt_buffer_set_end_pointer(pkt_buffer_t *b, unsigned int offset)
+static inline void pkt_buffer_set_end_pointer(struct pkt_buffer *b, unsigned int offset)
 {
 	b->end = b->head + offset;
 }
 
-static inline void pkt_buffer_set_data_pointer(pkt_buffer_t *b, unsigned int offset)
+static inline void pkt_buffer_set_data_pointer(struct pkt_buffer *b, unsigned int offset)
 {
 	b->data = b->head + offset;
 }
 
-static inline void pkt_buffer_put_data(pkt_buffer_t *b, unsigned int offset)
+static inline void pkt_buffer_put_data(struct pkt_buffer *b, unsigned int offset)
 {
 	b->data += offset;
 }
 
-static inline void pkt_buffer_put_end(pkt_buffer_t *b, unsigned int offset)
+static inline void pkt_buffer_put_end(struct pkt_buffer *b, unsigned int offset)
 {
 	b->end += offset;
 }
 
 /* Prototypes */
-extern ssize_t pkt_send(int fd, pkt_queue_t *, pkt_t *);
-extern ssize_t pkt_recv(int fd, pkt_t *);
-extern int mpkt_recv(int, mpkt_t *);
-extern void pkt_queue_run(pkt_queue_t *, int (*run) (pkt_t *, void *), void *);
-extern pkt_t *pkt_queue_get(pkt_queue_t *);
-extern int __pkt_queue_put(pkt_queue_t *, pkt_t *);
-extern int pkt_queue_put(pkt_queue_t *, pkt_t *);
-extern int mpkt_init(mpkt_t *, unsigned int);
-extern void mpkt_process(mpkt_t *, unsigned int, void (*process) (pkt_t *, void *), void *);
-extern void mpkt_destroy(mpkt_t *);
-extern void mpkt_reset(mpkt_t *);
-extern int __pkt_queue_mget(pkt_queue_t *, mpkt_t *);
-extern int pkt_queue_mget(pkt_queue_t *, mpkt_t *);
-extern int __pkt_queue_mput(pkt_queue_t *, mpkt_t *);
-extern int pkt_queue_mput(pkt_queue_t *, mpkt_t *);
-extern int pkt_queue_init(pkt_queue_t *);
-extern int pkt_queue_destroy(pkt_queue_t *);
-extern ssize_t pkt_buffer_send(int, pkt_buffer_t *, struct sockaddr_storage *);
-extern int pkt_buffer_put_zero(pkt_buffer_t *, unsigned int);
-extern int pkt_buffer_pad(pkt_buffer_t *, unsigned int);
-extern pkt_buffer_t *pkt_buffer_alloc(unsigned int);
-extern void pkt_buffer_free(pkt_buffer_t *);
-
-#endif
+ssize_t pkt_send(int fd, struct pkt_queue *q, struct pkt *p);
+ssize_t pkt_recv(int fd, struct pkt *p);
+void pkt_queue_run(struct pkt_queue *q, int (*run) (struct pkt *, void *), void *arg);
+struct pkt *__pkt_queue_get(struct pkt_queue *q);
+struct pkt *pkt_queue_get(struct pkt_queue *q);
+int __pkt_queue_put(struct pkt_queue *q, struct pkt *p);
+int pkt_queue_put(struct pkt_queue *, struct pkt *p);
+int pkt_queue_init(struct pkt_queue *q, int max_size);
+int pkt_queue_destroy(struct pkt_queue *q);
+int mpkt_dump(struct mpkt *p, int count);
+int mpkt_recv(int fd, struct mpkt *mp);
+int mpkt_init(struct mpkt *p, unsigned int vlen);
+void mpkt_process(struct mpkt *mp, unsigned int, void (*process) (struct pkt *, void *), void *arg);
+void mpkt_destroy(struct mpkt *mp);
+void mpkt_reset(struct mpkt *mp);
+int __pkt_queue_mget(struct pkt_queue *q, struct mpkt *mp);
+int pkt_queue_mget(struct pkt_queue *q, struct mpkt *mp);
+int __pkt_queue_mput(struct pkt_queue *q, struct mpkt *mp);
+int pkt_queue_mput(struct pkt_queue *q, struct mpkt *mp);
+ssize_t pkt_buffer_send(int fd, struct pkt_buffer *b, struct sockaddr_storage *addr);
+int pkt_buffer_put_zero(struct pkt_buffer *pkt, unsigned int size);
+int pkt_buffer_pad(struct pkt_buffer *b, unsigned int size);
+struct pkt_buffer *pkt_buffer_alloc(unsigned int size);
+void pkt_buffer_free(struct pkt_buffer *b);

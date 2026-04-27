@@ -6,7 +6,7 @@
  *              mode, all IPSEC ESP operations are done by the hardware to
  *              offload the kernel for crypto and packet handling. To further
  *              increase perfs we implement kernel routing offload via XDP.
- *              A XFRM kernel netlink reflector is dynamically andi
+ *              A XFRM kernel netlink reflector is dynamically and
  *              transparently mirroring kernel XFRM policies to the XDP layer
  *              for kernel netstack bypass. fastSwan is an XFRM offload feature.
  *
@@ -18,16 +18,12 @@
  *              either version 3.0 of the License, or (at your option) any later
  *              version.
  *
- * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include <stdio.h>
-#include <stdbool.h>
-#include <stdarg.h>
-#include <inttypes.h>
-#include <stdint.h>
-#include <string.h>
 #include <ctype.h>
+#include <string.h>
 
 #include "memory.h"
 #include "json_reader.h"
@@ -39,28 +35,28 @@ const char *WHITE_SPACE = WHITE_SPACE_STR;
 /*
  *	JSON handling Matrix
  */
-static bool json_parse_null(const char **, json_node_t **);
-static bool json_parse_false(const char **, json_node_t **);
-static bool json_parse_true(const char **, json_node_t **);
-static bool json_parse_string(const char **, json_node_t **);
-static bool json_parse_array(const char **, json_node_t **);
-static bool json_parse_object(const char **, json_node_t **);
-static bool json_parse_number(const char **, json_node_t **);
+static bool json_parse_null(const char **, struct json_node **);
+static bool json_parse_false(const char **, struct json_node **);
+static bool json_parse_true(const char **, struct json_node **);
+static bool json_parse_string(const char **, struct json_node **);
+static bool json_parse_array(const char **, struct json_node **);
+static bool json_parse_object(const char **, struct json_node **);
+static bool json_parse_number(const char **, struct json_node **);
 
-static void json_dump_null(json_node_t *, int);
-static void json_dump_bool(json_node_t *, int);
-static void json_dump_string(json_node_t *, int);
-static void json_dump_number(json_node_t *, int);
-static void json_dump_array(json_node_t *, int);
-static void json_dump_object(json_node_t *, int);
-static void json_dump_dummy(json_node_t *, int);
+static void json_dump_null(struct json_node *, int);
+static void json_dump_bool(struct json_node *, int);
+static void json_dump_string(struct json_node *, int);
+static void json_dump_number(struct json_node *, int);
+static void json_dump_array(struct json_node *, int);
+static void json_dump_object(struct json_node *, int);
+static void json_dump_dummy(struct json_node *, int);
 static void json_dump_tab(int);
 
 #define JSON_PARSE_TBL_SIZE 6
 static struct {
 	char	type;
-	bool	(*parse) (const char **, json_node_t **);
-	void	(*dump) (json_node_t *, int);
+	bool	(*parse) (const char **, struct json_node **);
+	void	(*dump) (struct json_node *, int);
 } json_parse_table[JSON_PARSE_TBL_SIZE + 1] = {
 	{	'n', 	json_parse_null,	json_dump_null		},
 	{	'f', 	json_parse_false,	json_dump_bool		},
@@ -76,7 +72,7 @@ static struct {
  *	Node creation
  */
 static void
-json_node_append(json_node_t *parent, json_node_t *child)
+json_node_append(struct json_node *parent, struct json_node *child)
 {
 	child->parent = parent;
 	child->prev = parent->child.tail;
@@ -90,16 +86,16 @@ json_node_append(json_node_t *parent, json_node_t *child)
 }
 
 static void
-json_append(json_node_t *obj, char *key, json_node_t *value)
+json_append(struct json_node *obj, char *key, struct json_node *value)
 {
 	value->key = key;
 	json_node_append(obj, value);
 }
 
 void
-json_destroy(json_node_t *node)
+json_destroy(struct json_node *node)
 {
-	json_node_t *n, *tmp;
+	struct json_node *n, *tmp;
 
 	if (!node)
 		return;
@@ -123,12 +119,12 @@ json_destroy(json_node_t *node)
 	FREE(node);
 }
 
-static json_node_t *
-json_mknode(json_tag_t tag)
+static struct json_node *
+json_mknode(enum json_tag tag)
 {
-	json_node_t *node;
+	struct json_node *node;
 
-	node = (json_node_t *) MALLOC(sizeof(json_node_t));
+	node = (struct json_node *) MALLOC(sizeof(*node));
 	if (!node)
 		return NULL;
 	node->tag = tag;
@@ -136,49 +132,49 @@ json_mknode(json_tag_t tag)
 	return node;
 }
 
-json_node_t *
+struct json_node *
 json_mknull(void)
 {
 	return json_mknode(JSON_NULL);
 }
 
-json_node_t *
+struct json_node *
 json_mkbool(bool b)
 {
-	json_node_t *node = json_mknode(JSON_BOOL);
+	struct json_node *node = json_mknode(JSON_BOOL);
 	if (!node)
 		return NULL;
 	node->bool_value = b;
 	return node;
 }
 
-json_node_t *
+struct json_node *
 json_mkstring(char *str)
 {
-	json_node_t *node = json_mknode(JSON_STRING);
+	struct json_node *node = json_mknode(JSON_STRING);
 	if (!node)
 		return NULL;
 	node->str_value = str;
 	return node;
 }
 
-json_node_t *
+struct json_node *
 json_mknumber(double n)
 {
-	json_node_t *node = json_mknode(JSON_NUMBER);
+	struct json_node *node = json_mknode(JSON_NUMBER);
 	if (!node)
 		return NULL;
 	node->number_value = n;	
 	return node;
 }
 
-json_node_t *
+struct json_node *
 json_mkarray(void)
 {
 	return json_mknode(JSON_ARRAY);
 }
 
-json_node_t *
+struct json_node *
 json_mkobject(void)
 {
 	return json_mknode(JSON_OBJECT);
@@ -189,7 +185,7 @@ json_mkobject(void)
 /*
  *	Parser
  */
-static bool json_parse_value(const char **, json_node_t **);
+static bool json_parse_value(const char **, struct json_node **);
 
 static void
 json_parser_skip_space(const char **sp)
@@ -274,7 +270,7 @@ json_extract_number(const char **sp, double *out)
 
 
 static bool
-json_parse_null(const char **sp, json_node_t **out)
+json_parse_null(const char **sp, struct json_node **out)
 {
 	const char *s = *sp;
 
@@ -287,7 +283,7 @@ json_parse_null(const char **sp, json_node_t **out)
 }
 
 static bool
-json_parse_false(const char **sp, json_node_t **out)
+json_parse_false(const char **sp, struct json_node **out)
 {
 	const char *s = *sp;
 
@@ -300,7 +296,7 @@ json_parse_false(const char **sp, json_node_t **out)
 }
 
 static bool
-json_parse_true(const char **sp, json_node_t **out)
+json_parse_true(const char **sp, struct json_node **out)
 {
 	const char *s = *sp;
 
@@ -313,7 +309,7 @@ json_parse_true(const char **sp, json_node_t **out)
 }
 
 static bool
-json_parse_string(const char **sp, json_node_t **out)
+json_parse_string(const char **sp, struct json_node **out)
 {
 	const char *s = *sp;
 	char *str;
@@ -327,10 +323,10 @@ json_parse_string(const char **sp, json_node_t **out)
 }
 
 static bool
-json_parse_array(const char **sp, json_node_t **out)
+json_parse_array(const char **sp, struct json_node **out)
 {
 	const char *s = *sp;
-	json_node_t *array = NULL, *element;
+	struct json_node *array = NULL, *element;
 
 	if (*s++ != '[')
 		goto error;
@@ -372,10 +368,10 @@ json_parse_array(const char **sp, json_node_t **out)
 }
 
 static bool
-json_parse_object(const char **sp, json_node_t **out)
+json_parse_object(const char **sp, struct json_node **out)
 {
 	const char *s = *sp;
-	json_node_t *obj = NULL, *value;
+	struct json_node *obj = NULL, *value;
 	char *key;
 
 	if (*s++ != '{')
@@ -429,7 +425,7 @@ json_parse_object(const char **sp, json_node_t **out)
 }
 
 static bool
-json_parse_number(const char **sp, json_node_t **out)
+json_parse_number(const char **sp, struct json_node **out)
 {
 	const char *s = *sp;
 	double number;
@@ -444,7 +440,7 @@ json_parse_number(const char **sp, json_node_t **out)
 
 
 static bool
-json_parse_value(const char **sp, json_node_t **out)
+json_parse_value(const char **sp, struct json_node **out)
 {
 	const char *s = *sp;
 	int i;
@@ -473,11 +469,11 @@ json_parse_value(const char **sp, json_node_t **out)
 }
 
 
-json_node_t *
+struct json_node *
 json_decode(const char *str)
 {
 	const char *s = str;
-	json_node_t *node;
+	struct json_node *node;
 
 	if (!json_parse_value(&s, &node))
 		return NULL;
@@ -496,9 +492,9 @@ json_decode(const char *str)
  *	Dump
  */
 static void
-json_dump_level(json_node_t *node, int level)
+json_dump_level(struct json_node *node, int level)
 {
-	json_node_t *n;
+	struct json_node *n;
 
 	if (!node)
 		return;
@@ -511,7 +507,7 @@ json_dump_level(json_node_t *node, int level)
 }
 
 void
-json_dump(json_node_t *node)
+json_dump(struct json_node *node)
 {
 	(*json_parse_table[node->tag].dump) (node, 0);
 }
@@ -523,7 +519,7 @@ static void json_dump_tab(int level)
 		putchar(' ');
 }
 
-static void json_dump_null(json_node_t *node, int level)
+static void json_dump_null(struct json_node *node, int level)
 {
 	json_dump_tab(level);
 	if (node->key)
@@ -531,7 +527,7 @@ static void json_dump_null(json_node_t *node, int level)
 	printf("null");
 }
 
-static void json_dump_bool(json_node_t *node, int level)
+static void json_dump_bool(struct json_node *node, int level)
 {
 	json_dump_tab(level);
 	if (node->key)
@@ -540,7 +536,7 @@ static void json_dump_bool(json_node_t *node, int level)
 
 }
 
-static void json_dump_string(json_node_t *node, int level)
+static void json_dump_string(struct json_node *node, int level)
 {
 	json_dump_tab(level);
 	if (node->key)
@@ -548,7 +544,7 @@ static void json_dump_string(json_node_t *node, int level)
 	printf("\"%s\"", node->str_value);
 }
 
-static void json_dump_number(json_node_t *node, int level)
+static void json_dump_number(struct json_node *node, int level)
 {
 	json_dump_tab(level);
 	if (node->key)
@@ -556,7 +552,7 @@ static void json_dump_number(json_node_t *node, int level)
 	printf("%f", node->number_value);
 }
 
-static void json_dump_array(json_node_t *node, int level)
+static void json_dump_array(struct json_node *node, int level)
 {
 	json_dump_tab(level);
 	printf("[\n");
@@ -564,7 +560,7 @@ static void json_dump_array(json_node_t *node, int level)
 	printf("]\n");
 }
 
-static void json_dump_object(json_node_t *node, int level)
+static void json_dump_object(struct json_node *node, int level)
 {
 	json_dump_tab(level);
 	if (node->key)
@@ -574,7 +570,7 @@ static void json_dump_object(json_node_t *node, int level)
 	printf("}\n");
 }
 
-static void json_dump_dummy(json_node_t *node, int level)
+static void json_dump_dummy(struct json_node *node, int level)
 {
 }
 
@@ -582,10 +578,10 @@ static void json_dump_dummy(json_node_t *node, int level)
 /*
  *	Lookup
  */
-json_node_t *
-json_find_member(json_node_t *node, const char *name)
+struct json_node *
+json_find_member(struct json_node *node, const char *name)
 {
-	json_node_t *n;
+	struct json_node *n;
 
 	if (!node || node->tag != JSON_OBJECT)
 		return NULL;
@@ -598,10 +594,10 @@ json_find_member(json_node_t *node, const char *name)
 	return NULL;
 }
 
-json_node_t *
-json_find_member_boolvalue(json_node_t *node, const char *name, bool *value)
+struct json_node *
+json_find_member_boolvalue(struct json_node *node, const char *name, bool *value)
 {
-	json_node_t *n;
+	struct json_node *n;
 
 	n = json_find_member(node, name);
 	if (!n)
@@ -615,10 +611,10 @@ json_find_member_boolvalue(json_node_t *node, const char *name, bool *value)
 	return NULL;
 }
 
-json_node_t *
-json_find_member_strvalue(json_node_t *node, const char *name, char **value)
+struct json_node *
+json_find_member_strvalue(struct json_node *node, const char *name, char **value)
 {
-	json_node_t *n;
+	struct json_node *n;
 
 	n = json_find_member(node, name);
 	if (!n)
@@ -632,10 +628,10 @@ json_find_member_strvalue(json_node_t *node, const char *name, char **value)
 	return NULL;
 }
 
-json_node_t *
-json_find_member_numbervalue(json_node_t *node, const char *name, double *value)
+struct json_node *
+json_find_member_numbervalue(struct json_node *node, const char *name, double *value)
 {
-	json_node_t *n;
+	struct json_node *n;
 
 	n = json_find_member(node, name);
 	if (!n)
@@ -649,16 +645,16 @@ json_find_member_numbervalue(json_node_t *node, const char *name, double *value)
 	return NULL;
 }
 
-json_node_t *
-json_find_member_doublevalue(json_node_t *node, const char *name, double *value)
+struct json_node *
+json_find_member_doublevalue(struct json_node *node, const char *name, double *value)
 {
 	return json_find_member_numbervalue(node, name, value);
 }
 	
-json_node_t *
-json_find_member_intvalue(json_node_t *node, const char *name, int *value)
+struct json_node *
+json_find_member_intvalue(struct json_node *node, const char *name, int *value)
 {
-	json_node_t *n;
+	struct json_node *n;
 
 	n = json_find_member(node, name);
 	if (!n)
@@ -672,8 +668,8 @@ json_find_member_intvalue(json_node_t *node, const char *name, int *value)
 	return NULL;
 }
 
-json_node_t *
-json_first_child(const json_node_t *node)
+struct json_node *
+json_first_child(const struct json_node *node)
 {
 	if (node && (node->tag == JSON_ARRAY || node->tag == JSON_OBJECT))
 		return node->child.head;

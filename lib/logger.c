@@ -6,7 +6,7 @@
  *              mode, all IPSEC ESP operations are done by the hardware to
  *              offload the kernel for crypto and packet handling. To further
  *              increase perfs we implement kernel routing offload via XDP.
- *              A XFRM kernel netlink reflector is dynamically andi
+ *              A XFRM kernel netlink reflector is dynamically and
  *              transparently mirroring kernel XFRM policies to the XDP layer
  *              for kernel netstack bypass. fastSwan is an XFRM offload feature.
  *
@@ -18,15 +18,17 @@
  *              either version 3.0 of the License, or (at your option) any later
  *              version.
  *
- * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
 
+#include <stdlib.h>
 #include <syslog.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <string.h>
 
-/* Boolean flag - send messages to console as well as syslog */
+/* Boolean flag - send messages to console instead of syslog */
 static bool log_console = false;
 
 void
@@ -36,33 +38,60 @@ enable_console_log(void)
 }
 
 void
-log_message(const int facility, const char *format, ...)
+log_message_va(const int priority, const char *fmt, va_list args)
 {
-	va_list args;
-	char buf[256];
-
-	va_start(args, format);
-	vsnprintf(buf, sizeof(buf), format, args);
-	va_end(args);
+	char buf[512];
+	int n;
 
 	if (log_console) {
-		fprintf(stderr, "%s\n", buf);
-	}
+		va_list args_cp;
+		char *p = NULL;
 
-	syslog(facility, "%s", buf);
+		va_copy(args_cp, args);
+		n = vsnprintf(buf, sizeof (buf), fmt, args);
+
+		/* output was truncated, we want full output on stderr */
+		if (n >= sizeof (buf)) {
+			p = malloc(n + 2);
+			if (!p)
+				return;
+			n = vsnprintf(p, n + 1, fmt, args_cp);
+		} else {
+			p = buf;
+		}
+		/* add trailing '\n' if there is none */
+		if (n > 0 && p[n - 1] == '\n')
+			p[n - 1] = 0;
+		fprintf(stderr, "%s\n", p);
+		if (p != buf)
+			free(p);
+	} else {
+		vsnprintf(buf, sizeof (buf), fmt, args);
+		syslog(priority, "%s", buf);
+	}
 }
 
 void
-conf_write(FILE *fp, const char *format, ...)
+log_message(const int priority, const char *fmt, ...)
 {
-        va_list args;
+	va_list args;
 
-        va_start(args, format);
-        if (fp) {
-                vfprintf(fp, format, args);
-                fprintf(fp, "\n");
-        } else
-                log_message(LOG_INFO, format, args);
+	va_start(args, fmt);
+	log_message_va(priority, fmt, args);
+	va_end(args);
+}
 
-        va_end(args);
+void
+conf_write(FILE *fp, const char *fmt, ...)
+{
+	va_list args;
+
+	va_start(args, fmt);
+	if (fp) {
+		vfprintf(fp, fmt, args);
+		fprintf(fp, "\n");
+	} else
+		log_message_va(LOG_INFO, fmt, args);
+
+	va_end(args);
 }

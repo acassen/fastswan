@@ -1,0 +1,112 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+/*
+ * Soft:        The main goal of this project is to provide a fast data-path
+ *              for the Linux Kernel XFRM layer. Some NIC vendors offer IPSEC
+ *              acceleration via a Crypto mode or a Packet mode. In Packet
+ *              mode, all IPSEC ESP operations are done by the hardware to
+ *              offload the kernel for crypto and packet handling. To further
+ *              increase perfs we implement kernel routing offload via XDP.
+ *              A XFRM kernel netlink reflector is dynamically and
+ *              transparently mirroring kernel XFRM policies to the XDP layer
+ *              for kernel netstack bypass. fastSwan is an XFRM offload feature.
+ *
+ * Authors:     Alexandre Cassen, <acassen@gmail.com>
+ *
+ *              This program is free software; you can redistribute it and/or
+ *              modify it under the terms of the GNU Affero General Public
+ *              License Version 3.0 as published by the Free Software Foundation;
+ *              either version 3.0 of the License, or (at your option) any later
+ *              version.
+ *
+ * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
+ */
+
+#pragma once
+
+/* system includes */
+#include <stdio.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <netinet/in.h>
+
+/* defines */
+#define INET_DEFAULT_CONNECTION_KEEPIDLE	20
+#define INET_DEFAULT_CONNECTION_KEEPCNT		2
+#define INET_DEFAULT_CONNECTION_KEEPINTVL	10
+
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+#define NIPQUAD(__addr)				\
+	((unsigned char *)&(__addr))[0],	\
+	((unsigned char *)&(__addr))[1],	\
+	((unsigned char *)&(__addr))[2],	\
+	((unsigned char *)&(__addr))[3]
+#elif __BYTE_ORDER == __BIG_ENDIAN
+#define NIPQUAD(__addr)				\
+	((unsigned char *)&(__addr))[3],	\
+	((unsigned char *)&(__addr))[2],	\
+	((unsigned char *)&(__addr))[1],	\
+	((unsigned char *)&(__addr))[0]
+#else
+#error "Please fix <bits/endian.h>"
+#endif
+
+#define ETHER_FMT "%.2x:%.2x:%.2x:%.2x:%.2x:%.2x"
+#define ETHER_BYTES(__eth_addr)			\
+	(unsigned char)__eth_addr[0],		\
+	(unsigned char)__eth_addr[1],		\
+	(unsigned char)__eth_addr[2],		\
+	(unsigned char)__eth_addr[3],		\
+	(unsigned char)__eth_addr[4],		\
+	(unsigned char)__eth_addr[5]
+
+#define ETHER_IS_BROADCAST(__eth_addr)					\
+	(((__eth_addr)[0] & (__eth_addr)[1] & (__eth_addr)[2] &		\
+	  (__eth_addr)[3] & (__eth_addr)[4] & (__eth_addr)[5]) == 0xff)
+
+
+/* Prototypes defs */
+uint16_t in_csum(uint16_t *addr, int, uint16_t csum);
+uint16_t udp_csum(const void *buffer, size_t len,
+		  uint32_t src_addr, uint32_t dst_addr);
+ssize_t inet_str2fqdn(uint8_t *dst, size_t dsize, const char *src);
+char *inet_fqdn2str(char *dst, size_t dsize, const uint8_t *fqdn, size_t fsize);
+char *inet_ntoa2(uint32_t addr, char *buffer);
+int inet_stosockaddr(const char *str, const uint16_t port,
+		     struct sockaddr_storage *addr);
+int inet_ip4tosockaddr(uint32_t addr_ip,
+		       struct sockaddr_storage *addr);
+char *inet_sockaddrtos2(struct sockaddr_storage *addr,
+			char *addr_str);
+char *inet_sockaddrtos(struct sockaddr_storage *addr);
+uint16_t inet_sockaddrport(struct sockaddr_storage *addr);
+uint32_t inet_sockaddrip4(struct sockaddr_storage *addr);
+int inet_sockaddrip6(struct sockaddr_storage *addr,
+		     struct in6_addr *ip6);
+int inet_ston(const char *str, uint32_t *addr);
+uint32_t inet_broadcast(uint32_t network, uint32_t netmask);
+uint32_t inet_bits_to_mask(uint8_t cidr);
+uint8_t inet_mask_to_bits(uint32_t mask);
+int inet_mask6_to_bits(const struct in6_addr *mask);
+void inet_bits_to_mask6(int prefix_bits, struct in6_addr *mask);
+char *inet_fd2str(int fd, char *dst, size_t dsize);
+int inet_setsockopt_reuseaddr(int fd, int onoff);
+int inet_setsockopt_nolinger(int fd, int onoff);
+int inet_setsockopt_tcpcork(int fd, int onoff);
+int inet_setsockopt_nodelay(int fd, int onoff);
+int inet_setsockopt_keepalive(int fd, int optval);
+int inet_setsockopt_tcp_keepidle(int fd, int optval);
+int inet_setsockopt_tcp_keepcnt(int fd, int optval);
+int inet_setsockopt_tcp_keepintvl(int fd, int optval);
+int inet_setsockopt_rcvtimeo(int fd, int timeout);
+int inet_setsockopt_sndtimeo(int fd, int timeout);
+int inet_setsockopt_reuseport(int fd, int onoff);
+int inet_setsockopt_hdrincl(int fd);
+int inet_setsockopt_broadcast(int fd);
+int inet_setsockopt_promisc(int fd, int ifindex, bool enable);
+int inet_setsockopt_attach_bpf(int fd, int prog_fd);
+int inet_setsockopt_no_receive(int fd);
+int inet_setsockopt_rcvbuf(int fd, int optval);
+int inet_setsockopt_sndbuf(int fd, int optval );
+int inet_setsockopt_sndbufforce(int fd, int optval);
+int inet_setsockopt_bindtodevice(int fd, const char *ifname);
+int inet_setsockopt_priority(int fd, int family);

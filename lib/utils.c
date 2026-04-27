@@ -6,7 +6,7 @@
  *              mode, all IPSEC ESP operations are done by the hardware to
  *              offload the kernel for crypto and packet handling. To further
  *              increase perfs we implement kernel routing offload via XDP.
- *              A XFRM kernel netlink reflector is dynamically andi
+ *              A XFRM kernel netlink reflector is dynamically and
  *              transparently mirroring kernel XFRM policies to the XDP layer
  *              for kernel netstack bypass. fastSwan is an XFRM offload feature.
  *
@@ -18,414 +18,147 @@
  *              either version 3.0 of the License, or (at your option) any later
  *              version.
  *
- * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
 
-#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
 #include <unistd.h>
+#include <string.h>
+#include <ctype.h>
 #include <fcntl.h>
-#include <ifaddrs.h>
-#include <net/if.h>
+#include <sys/utsname.h>
+#include <arpa/inet.h>
+#include <arpa/nameser.h>
+#include <netdb.h>
+#include <errno.h>
+
 #include "utils.h"
 
 /* global vars */
 unsigned long debug = 0;
 
-/* Display a buffer into a HEXA formated output */
-void
-dump_buffer(char *prefix, char *buff, int count)
-{
-        int i, j, c;
-        int printnext = 1;
-
-        if (count % 16)
-                c = count + (16 - count % 16);
-        else
-                c = count;
-
-        for (i = 0; i < c; i++) {
-                if (printnext) {
-                        printnext--;
-                        printf("%s%.4x ", prefix, i & 0xffff);
-                }
-                if (i < count)
-                        printf("%3.2x", buff[i] & 0xff);
-                else
-                        printf("   ");
-                if (!((i + 1) % 8)) {
-                        if ((i + 1) % 16)
-                                printf(" -");
-                        else {
-                                printf("   ");
-                                for (j = i - 15; j <= i; j++)
-                                        if (j < count) {
-                                                if ((buff[j] & 0xff) >= 0x20
-                                                    && (buff[j] & 0xff) <= 0x7e)
-                                                        printf("%c",
-                                                               buff[j] & 0xff);
-                                                else
-                                                        printf(".");
-                                        } else
-                                                printf(" ");
-                                printf("\n");
-                                printnext = 1;
-                        }
-                }
-        }
-}
-
-/* Compute a checksum */
-uint16_t
-in_csum(uint16_t *addr, int len, uint16_t csum)
-{
-	register int nleft = len;
-	const uint16_t *w = addr;
-	register uint16_t answer;
-	register uint32_t sum = csum;
-
-	/*
-	 *  Our algorithm is simple, using a 32 bit accumulator (sum),
-	 *  we add sequential 16 bit words to it, and at the end, fold
-	 *  back all the carry bits from the top 16 bits into the lower
-	 *  16 bits.
-	 */
-	while (nleft > 1) {
-		sum += *w++;
-		nleft -= 2;
-	}
-
-	/* mop up an odd byte, if necessary */
-	if (nleft == 1)
-		sum += htons(*(u_char *) w << 8);
-
-	/*
-	 * add back carry outs from top 16 bits to low 16 bits
-	 */
-	sum = (sum >> 16) + (sum & 0xffff);	/* add hi 16 to low 16 */
-	sum += (sum >> 16);			/* add carry */
-	answer = ~sum;				/* truncate to 16 bits */
-	return (answer);
-}
-
-/* Compute udp checksum */
-uint16_t
-udp_csum(const void *buffer, size_t len, uint32_t src_addr, uint32_t dest_addr)
-{
-	const uint16_t *buf = buffer;
-	uint16_t *ip_src = (void*)&src_addr, *ip_dst = (void*)&dest_addr;
-	uint32_t sum;
-	size_t length = len;
-
-	/* Calculate the sum */
-	sum = 0;
-	while (len > 1) {
-		sum += *buf++;
-		if (sum & 0x80000000)
-			sum = (sum & 0xFFFF) + (sum >> 16);
-		len -= 2;
-	}
-
-	if (len & 1)
-		/* Add the padding if the packet lenght is odd */
-		sum += *((uint8_t*)buf);
-
-	/* Add the pseudo-header */
-	sum += *(ip_src++);
-	sum += *ip_src;
-
-	sum += *(ip_dst++);
-	sum += *ip_dst;
-
-	sum += htons(IPPROTO_UDP);
-	sum += htons(length);
-
-	/* Add the carries */
-	while (sum >> 16)
-		sum = (sum & 0xFFFF) + (sum >> 16);
-
-	/* Return the one's complement of sum */
-	return (uint16_t)~sum;
-}
-
-/* IP network to ascii representation */
-char *
-inet_ntop2(uint32_t ip)
-{
-	static char buf[16];
-	unsigned char *bytep;
-
-	bytep = (unsigned char *) &(ip);
-	sprintf(buf, "%d.%d.%d.%d", bytep[0], bytep[1], bytep[2], bytep[3]);
-	return buf;
-}
 
 /*
- * IP network to ascii representation. To use
- * for multiple IP address convertion into the same call.
+ * like snprintf & vsnprintf, but always return number of char
+ * written, this allows usage like this:
+ *
+ * len += scnprintf(buf + len, size - len, ...)
  */
-char *
-inet_ntoa2(uint32_t ip, char *buf)
+int
+vscnprintf(char *buf, size_t size, const char *format, va_list args)
 {
-	unsigned char *bytep;
+	int ret;
 
-	bytep = (unsigned char *) &(ip);
-	sprintf(buf, "%d.%d.%d.%d", bytep[0], bytep[1], bytep[2], bytep[3]);
-	return buf;
-}
-
-/* IP string to network mask representation. CIDR notation. */
-uint8_t
-inet_stom(char *addr)
-{
-	uint8_t mask = 32;
-	char *cp = addr;
-
-	if (!strstr(addr, "/"))
-		return mask;
-	while (*cp != '/' && *cp != '\0')
-		cp++;
-	if (*cp == '/')
-		return atoi(++cp);
-	return mask;
-}
-
-/* IP string to network range representation. */
-uint8_t
-inet_stor(char *addr)
-{
-	char *cp = addr;
-
-	if (!strstr(addr, "-"))
+	if (!size)
 		return 0;
-	while (*cp != '-' && *cp != '\0')
-		cp++;
-	if (*cp == '-')
-		return strtoul(++cp, NULL, (strchr(addr, ':')) ? 16 : 10);
-	return 0;
-}
-
-/* IP string to sockaddr_storage */
-int
-inet_stosockaddr(const char *ip, const uint16_t port, struct sockaddr_storage *addr)
-{
-	void *addr_ip;
-
-	addr->ss_family = (strchr(ip, ':')) ? AF_INET6 : AF_INET;
-
-	if (addr->ss_family == AF_INET6) {
-		struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *) addr;
-		if (port)
-			addr6->sin6_port = htons(port);
-		addr_ip = &addr6->sin6_addr;
-	} else {
-		struct sockaddr_in *addr4 = (struct sockaddr_in *) addr;
-		if (port)
-			addr4->sin_port = htons(port);
-		addr_ip = &addr4->sin_addr;
-	}
-
-	if (!inet_pton(addr->ss_family, ip, addr_ip))
-		return -1;
-
-	return 0;
-}
-
-/* IPv4 to sockaddr_storage */
-int
-inet_ip4tosockaddr(uint32_t addr_ip, struct sockaddr_storage *addr)
-{
-	struct sockaddr_in *addr4 = (struct sockaddr_in *) addr;
-	addr4->sin_family = AF_INET;
-	addr4->sin_addr.s_addr = addr_ip;
-	return 0;
-}
-
-/* IP network to string representation */
-char *
-inet_sockaddrtos2(struct sockaddr_storage *addr, char *addr_str)
-{
-	void *addr_ip;
-
-	if (addr->ss_family == AF_INET6) {
-		struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *) addr;
-		addr_ip = &addr6->sin6_addr;
-	} else {
-		struct sockaddr_in *addr4 = (struct sockaddr_in *) addr;
-		addr_ip = &addr4->sin_addr;
-	}
-
-	if (!inet_ntop(addr->ss_family, addr_ip, addr_str, INET6_ADDRSTRLEN))
-		return NULL;
-
-	return addr_str;
-}
-
-char *
-inet_sockaddrtos(struct sockaddr_storage *addr)
-{
-	static char addr_str[INET6_ADDRSTRLEN];
-	inet_sockaddrtos2(addr, addr_str);
-	return addr_str;
-}
-
-uint16_t
-inet_sockaddrport(struct sockaddr_storage *addr)
-{
-	uint16_t port;
-
-	if (addr->ss_family == AF_INET6) {
-		struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *) addr;
-		port = addr6->sin6_port;
-	} else {
-		struct sockaddr_in *addr4 = (struct sockaddr_in *) addr;
-		port = addr4->sin_port;
-	}
-	
-	return port;
-}
-
-uint32_t
-inet_sockaddrip4(struct sockaddr_storage *addr)
-{
-	if (addr->ss_family != AF_INET)
-		return -1;
-	
-	return ((struct sockaddr_in *) addr)->sin_addr.s_addr;
+	ret = vsnprintf(buf, size, format, args);
+	if ((size_t)ret > size - 1)
+		return size - 1;
+	return ret;
 }
 
 int
-inet_sockaddrip6(struct sockaddr_storage *addr, struct in6_addr *ip6)
+scnprintf(char *buf, size_t size, const char *format, ...)
 {
-	if (addr->ss_family != AF_INET6)
-		return -1;
-	
-	*ip6 = ((struct sockaddr_in6 *) addr)->sin6_addr;
-	return 0;
+	va_list ap;
+	int ret;
+
+	va_start(ap, format);
+	ret = vscnprintf(buf, size, format, ap);
+	va_end(ap);
+	return ret;
 }
 
-/* Get ifindex from IP Address */
-int
-inet_sockaddrifindex(struct sockaddr_storage *addr)
+/* Display a buffer into a HEXA formated output */
+size_t
+hexdump(const char *prefix, const unsigned char *buffer, size_t bsize)
 {
-	struct ifaddrs *ifaddr, *ifa;
-	int family, ifindex;
+	size_t i, j;
 
-	if (getifaddrs(&ifaddr) == -1)
-		return -1;
+	if (!buffer)
+		return 0;
 
-	for (ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
-		if (!ifa->ifa_addr)
-			continue;
+	for (i = 0; i < bsize; i += 16) {
+		/* Print offset */
+		printf("%s%08zx  ", prefix, i);
 
-		family = ifa->ifa_addr->sa_family;
-		if (family != addr->ss_family)
-			continue;
+		/* Print hex values */
+		for (j = 0; j < 16; j++) {
+			if (i + j < bsize)
+				printf("%02x ", buffer[i + j]);
+			else
+				printf("   ");
 
-		if (family == AF_INET6) {
-			struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *) addr;
-			struct sockaddr_in6 *ifa_addr6 = (struct sockaddr_in6 *) ifa->ifa_addr;
-
-			if (__ip6_addr_equal(&addr6->sin6_addr, &ifa_addr6->sin6_addr))
-				goto match;
-			continue;
+			if (j == 7)
+				printf("- ");
 		}
 
-		struct sockaddr_in *addr4 = (struct sockaddr_in *) addr;
-		struct sockaddr_in *ifa_addr4 = (struct sockaddr_in *) ifa->ifa_addr;
+		/* Print ASCII representation */
+		for (j = 0; j < 16 && i + j < bsize; j++) {
+			unsigned char c = buffer[i + j];
+			printf("%c", (c >= 32 && c <= 126) ? c : '.');
+		}
 
-		if (addr4->sin_addr.s_addr == ifa_addr4->sin_addr.s_addr)
-			goto match;
+		printf("\n");
 	}
 
-	freeifaddrs(ifaddr);
-	return -1;
-
-  match:
-	ifindex = if_nametoindex(ifa->ifa_name);
-	freeifaddrs(ifaddr);
-	return ifindex;
+	return bsize;
 }
 
-/*
- * IP string to network representation
- * Highly inspired from Paul Vixie code.
- */
-int
-inet_ston(const char *addr, uint32_t * dst)
+ssize_t
+hexdump_format(const char *prefix, unsigned char *dst, size_t dsize,
+	       const unsigned char *src, size_t ssize)
 {
-	static char digits[] = "0123456789";
-	int saw_digit, octets, ch;
-	u_char tmp[INADDRSZ], *tp;
+	size_t i, j, pos = 0;
 
-	saw_digit = 0;
-	octets = 0;
-	*(tp = tmp) = 0;
+	if (!dst || !src)
+		return -1;
 
-	while ((ch = *addr++) != '\0' && ch != '/' && ch != '-') {
-		const char *pch;
-		if ((pch = strchr(digits, ch)) != NULL) {
-			u_int new = *tp * 10 + (pch - digits);
-			if (new > 255)
-				return 0;
-			*tp = new;
-			if (!saw_digit) {
-				if (++octets > 4)
-					return 0;
-				saw_digit = 1;
-			}
-		} else if (ch == '.' && saw_digit) {
-			if (octets == 4)
-				return 0;
-			*++tp = 0;
-			saw_digit = 0;
-		} else
-			return 0;
+	for (i = 0; i < ssize; i += 16) {
+		/* Print offset */
+		pos += scnprintf((char *)dst + pos, dsize - pos, "%s%04zx  ", prefix, i);
+
+		/* Print hex values */
+		for (j = 0; j < 16; j++) {
+			if (i + j < ssize)
+				pos += scnprintf((char *)dst + pos, dsize - pos, "%02x ", src[i + j]);
+			else
+				pos += scnprintf((char *)dst + pos, dsize - pos, "   ");
+
+			if (j == 7)
+				pos += scnprintf((char *)dst + pos, dsize - pos, "- ");
+		}
+
+		pos += scnprintf((char *)dst + pos, dsize - pos, " ");
+
+		/* Print ASCII representation */
+		for (j = 0; j < 16 && i + j < ssize; j++) {
+			unsigned char c = src[i + j];
+			pos += scnprintf((char *)dst + pos, dsize - pos, "%c",
+					 (c >= 32 && c <= 126) ? c : '.');
+		}
+
+		/* Last '\n' MUST be under the caller's control */
+		if (i + 16 < ssize)
+			pos += scnprintf((char *)dst + pos, dsize - pos, "\n");
 	}
 
-	if (octets < 4)
-		return 0;
-
-	memcpy(dst, tmp, INADDRSZ);
-	return 1;
+	return pos;
 }
 
-/*
- * Return broadcast address from network and netmask.
- */
-uint32_t
-inet_broadcast(uint32_t network, uint32_t netmask)
+void
+buffer_to_c_array(const char *name, const unsigned char *buffer, size_t bsize)
 {
-	return 0xffffffff - netmask + network;
-}
+	int i;
 
-/*
- * Convert CIDR netmask notation to long notation.
- */
-uint32_t
-inet_bits2mask(uint8_t bits)
-{
-	uint32_t mask = 0xffffffff;
-
-	if (bits == 0)
-		return 0;
-
-	if (bits < 32)
-		mask <<= (32 - bits);
-
-	return htonl(mask);
-}
-
-uint8_t
-inet_mask2bits(uint32_t mask)
-{
-	uint8_t bits = 0;
-
-	while (mask) {
-		bits += (mask & 0x01);
-		mask >>= 1;
-	}
-
-	return bits;
+	printf("const unsigned char %s[%ld] = {\n  ", name, bsize);
+	for (i = 0; i < bsize; i++)
+		printf("0x%.2x%s%s", buffer[i] & 0xff
+				   , (i < bsize - 1) ? "," : ""
+				   , ((i + 1) % 16) ? " " : "\n  ");
+	printf("\n};\n");
 }
 
 /* Getting localhost official canonical name */
@@ -465,7 +198,7 @@ char
 hextochar(char c)
 {
 	char pseudo[] = { '0', '1', '2', '3', '4', '5', '6', '7', '8',
-                          '9', 'a', 'b', 'c', 'd', 'e', 'f' };
+			  '9', 'a', 'b', 'c', 'd', 'e', 'f' };
 
 	return pseudo[(int) c];
 }
@@ -475,33 +208,38 @@ hextostring(char *data, int size, char *buffer_out)
 	char ch = 0x00;
 	int i = 0, j = 0;
 
-        for (i = 0; i < size; i++) {
-                ch = (char) (data[i] & 0xf0);		/* Strip off high nibble */
-                ch = (char) (ch >> 4);			/* shift the bits down */
-                ch = (char) (ch & 0x0f);		/* must do this is high order bit is on! */
-                buffer_out[j++] = hextochar(ch);	/* convert the nibble to a String Character */
+	for (i = 0; i < size; i++) {
+		ch = (char) (data[i] & 0xf0);		/* Strip off high nibble */
+		ch = (char) (ch >> 4);			/* shift the bits down */
+		ch = (char) (ch & 0x0f);		/* must do this is high order bit is on! */
+		buffer_out[j++] = hextochar(ch);	/* convert the nibble to a String Character */
 
-                ch = (char) (data[i] & 0x0f);		/* Strip off low nibble */
-                buffer_out[j++] = hextochar(ch);	/* convert the nibble to a String Character */
-        }
+		ch = (char) (data[i] & 0x0f);		/* Strip off low nibble */
+		buffer_out[j++] = hextochar(ch);	/* convert the nibble to a String Character */
+	}
 
-        buffer_out[j++] = '\0';
-        return 0;
+	buffer_out[j++] = '\0';
+	return 0;
 }
 int
 stringtohex(const char *buffer_in, int size_in, char *buffer_out, int size_out)
 {
-        static char digits[] = "0123456789abcdef";
-        const char *cp = buffer_in;
-        int i=0, ch;
+	static char digits[] = "0123456789abcdef";
+	const char *cp = buffer_in;
+	int i=0, ch;
 
-        while ((ch = *cp++) != '\0' && i < size_in) {
-                const char *pch;
-                if ((pch = strchr(digits, tolower(ch))) != NULL) {
-                        buffer_out[i/2] |= (pch - digits) << 4 * (1 - (i % 2));
-                        i++;
-                }
-        }
+	if (size_in > 2 * size_out) {
+		errno = ENOSPC;
+		return -1;
+	}
+
+	while ((ch = *cp++) != '\0' && i < size_in) {
+		const char *pch;
+		if ((pch = strchr(digits, tolower(ch))) != NULL) {
+			buffer_out[i/2] |= (pch - digits) << 4 * (1 - (i % 2));
+			i++;
+		}
+	}
 
 	return 0;
 }
@@ -523,17 +261,6 @@ swapbuffer(uint8_t *buffer_in, int size_in, uint8_t *buffer_out)
 	return 0;
 }
 
-
-/*
- *	Non-Block stuff
- */
-int
-__set_nonblock(int fd)
-{
-	int val = fcntl(fd, F_GETFL, 0);
-	return fcntl(fd, F_SETFL, val | O_NONBLOCK);
-}
-
 /*
  *	CRC32 helpers
  */
@@ -545,31 +272,31 @@ __set_nonblock(int fd)
 uint32_t
 adler_crc32(uint8_t *data, size_t len)
 {
-        uint32_t a = 1, b = 0;
+	uint32_t a = 1, b = 0;
 
-        while (len) {
-                size_t tlen = len > 5550 ? 5550 : len;
-                len -= tlen;
-                do {
-                        a += *data++;
-                        b += a;
-                } while (--tlen);
+	while (len) {
+		size_t tlen = len > 5550 ? 5550 : len;
+		len -= tlen;
+		do {
+			a += *data++;
+			b += a;
+		} while (--tlen);
 
-                a = (a & 0xffff) + (a >> 16) * (65536-MOD_ADLER);
-                b = (b & 0xffff) + (b >> 16) * (65536-MOD_ADLER);
-        }
+		a = (a & 0xffff) + (a >> 16) * (65536-MOD_ADLER);
+		b = (b & 0xffff) + (b >> 16) * (65536-MOD_ADLER);
+	}
 
-        /* It can be shown that a <= 0x1013a here, so a single subtract will do. */
-        if (a >= MOD_ADLER)
-                a -= MOD_ADLER;
+	/* It can be shown that a <= 0x1013a here, so a single subtract will do. */
+	if (a >= MOD_ADLER)
+		a -= MOD_ADLER;
 
-        /* It can be shown that b can reach 0xffef1 here. */
-        b = (b & 0xffff) + (b >> 16) * (65536-MOD_ADLER);
+	/* It can be shown that b can reach 0xffef1 here. */
+	b = (b & 0xffff) + (b >> 16) * (65536-MOD_ADLER);
 
-        if (b >= MOD_ADLER)
-                b -= MOD_ADLER;
+	if (b >= MOD_ADLER)
+		b -= MOD_ADLER;
 
-        return (b << 16) | a;
+	return (b << 16) | a;
 }
 
 /*
@@ -578,24 +305,24 @@ adler_crc32(uint8_t *data, size_t len)
 uint32_t
 fletcher_crc32(uint8_t *data, size_t len)
 {
-        uint32_t sum1 = 0xffff, sum2 = 0xffff;
+	uint32_t sum1 = 0xffff, sum2 = 0xffff;
 
-        while (len) {
-                unsigned tlen = len > 360 ? 360 : len;
-                len -= tlen;
-                do {
-                        sum1 += *data++;
-                        sum2 += sum1;
-                } while (--tlen);
-                sum1 = (sum1 & 0xffff) + (sum1 >> 16);
-                sum2 = (sum2 & 0xffff) + (sum2 >> 16);
-        }
+	while (len) {
+		unsigned tlen = len > 360 ? 360 : len;
+		len -= tlen;
+		do {
+			sum1 += *data++;
+			sum2 += sum1;
+		} while (--tlen);
+		sum1 = (sum1 & 0xffff) + (sum1 >> 16);
+		sum2 = (sum2 & 0xffff) + (sum2 >> 16);
+	}
 
-        /* Second reduction step to reduce sums to 16 bits */
-        sum1 = (sum1 & 0xffff) + (sum1 >> 16);
-        sum2 = (sum2 & 0xffff) + (sum2 >> 16);
+	/* Second reduction step to reduce sums to 16 bits */
+	sum1 = (sum1 & 0xffff) + (sum1 >> 16);
+	sum2 = (sum2 & 0xffff) + (sum2 >> 16);
 
-        return sum2 << 16 | sum1;
+	return sum2 << 16 | sum1;
 }
 
 
@@ -603,17 +330,17 @@ fletcher_crc32(uint8_t *data, size_t len)
 int
 integer_to_string(const int value, char *str, size_t size)
 {
-        int i, len = 0, t = value, s = size;
+	int i, len = 0, t = value, s = size;
 
-        for (i = value; i; i/=10) {
-                if (++len > s)
-                        return -1;
-        }
+	for (i = value; i; i/=10) {
+		if (++len > s)
+			return -1;
+	}
 
-        for (i = 0; i < len; i++,t/=10)
-                str[len - (i + 1)] = t % 10 + '0';
+	for (i = 0; i < len; i++,t/=10)
+		str[len - (i + 1)] = t % 10 + '0';
 
-        return len;
+	return len;
 }
 
 /*
@@ -635,22 +362,23 @@ poor_prng(unsigned int *seed)
 /*
  *	XorShift*
  */
-uint32_t
+uint64_t
 xorshift_prng(uint64_t *state)
 {
 	*state ^= *state >> 12;
 	*state ^= *state << 25;
 	*state ^= *state >> 27;
-	return (*state * 0x2545F4914F6CDD1DULL) >> 32;
+	return *state * 0x2545F4914F6CDD1DULL;
 }
 
 /*
  * Copy string src to buffer dst of size dsize.  At most dsize-1
  * chars will be copied.  Always NUL terminates (unless dsize == 0).
  * Returns strlen(src); if retval >= dsize, truncation occurred.
+ * -- Coming from OpenBSD
  */
 size_t
-strlcpy(char *dst, const char *src, size_t dsize)
+bsd_strlcpy(char *dst, const char *src, size_t dsize)
 {
 	const char *osrc = src;
 	size_t nleft = dsize;
@@ -680,9 +408,10 @@ strlcpy(char *dst, const char *src, size_t dsize)
  * will be copied.  Always NUL terminates (unless dsize <= strlen(dst)).
  * Returns strlen(src) + MIN(dsize, strlen(initial dst)).
  * If retval >= dsize, truncation occurred.
+ * -- Coming from OpenBSD
  */
 size_t
-strlcat(char *dst, const char *src, size_t dsize)
+bsd_strlcat(char *dst, const char *src, size_t dsize)
 {
 	const char *odst = dst;
 	const char *osrc = src;
@@ -707,4 +436,91 @@ strlcat(char *dst, const char *src, size_t dsize)
 	*dst = '\0';
 
 	return(dlen + (src - osrc));	/* count does not include NUL */
+}
+
+char *
+memcpy2str(char *dst, size_t dsize, const void *src, size_t ssize)
+{
+	uint8_t *cp = (uint8_t *) src;
+	size_t i;
+
+	for (i = 0; i < ssize && i < dsize - 1; i++)
+		dst[i] = *cp++;
+	dst[i] = '\0';
+	return dst;
+}
+
+int
+open_pipe(int pipe_arr[2])
+{
+	/* Open pipe */
+	if (pipe2(pipe_arr, O_CLOEXEC | O_NONBLOCK) == -1)
+		return -1;
+
+	return 0;
+}
+
+/*
+ *	Fast hash function for buffer data
+ *	Based on FNV-1a hash algorithm - fast and good distribution
+ */
+uint32_t
+fnv1a_hash(const uint8_t *buffer, size_t size)
+{
+	uint32_t hash = 2166136261U; /* FNV offset basis */
+	const uint8_t *end = buffer + size;
+
+	if (!buffer || !size)
+		return 0;
+
+	/* Process 4 bytes at a time for speed */
+	while (buffer + 4 <= end) {
+		hash ^= *(const uint32_t *) buffer;
+		hash *= 16777619U; /* FNV prime */
+		buffer += 4;
+	}
+
+	/* Process remaining bytes */
+	while (buffer < end) {
+		hash ^= *buffer++;
+		hash *= 16777619U;
+	}
+
+	return hash;
+}
+
+
+/*
+ * split given buffer into array using delimiters, consecutive
+ * delimiters occurence are merged
+ * does *NOT* remove leading occurence of delimiter
+ */
+void
+split_line(char *buf, int *argc, char **argv, const char *delim,
+	   int max_args)
+{
+	int scan;
+
+	*argc = 1;
+	argv[0] = buf;
+
+	scan = 0;
+	while (*buf) {
+		if (!scan) {
+			if (strchr(delim, *buf)) {
+				*buf = 0;
+				scan = 1;
+			}
+		} else {
+			if (!strchr(delim, *buf)) {
+				(*argc)++;
+				argv[*argc - 1] = buf;
+				scan = 0;
+
+				if (*argc == max_args)
+					return;
+			}
+		}
+		buf++;
+	}
 }

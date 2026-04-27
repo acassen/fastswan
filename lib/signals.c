@@ -6,7 +6,7 @@
  *              mode, all IPSEC ESP operations are done by the hardware to
  *              offload the kernel for crypto and packet handling. To further
  *              increase perfs we implement kernel routing offload via XDP.
- *              A XFRM kernel netlink reflector is dynamically andi
+ *              A XFRM kernel netlink reflector is dynamically and
  *              transparently mirroring kernel XFRM policies to the XDP layer
  *              for kernel netstack bypass. fastSwan is an XFRM offload feature.
  *
@@ -18,25 +18,17 @@
  *              either version 3.0 of the License, or (at your option) any later
  *              version.
  *
- * Copyright (C) 2025 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
 
-#include "config.h"
-
-#include <stdio.h>
-#include <string.h>
-#include <fcntl.h>
 #include <unistd.h>
-#include <sys/wait.h>
+#include <string.h>
 #include <errno.h>
 #include <sys/signalfd.h>
-#include <inttypes.h>
-#include <assert.h>
 
 #include "signals.h"
-#include "utils.h"
 #include "logger.h"
-#include "scheduler.h"
+#include "thread.h"
 
 /* We need to include the realtime signals, but
  * unfortunately SIGRTMIN/SIGRTMAX are not constants.
@@ -67,7 +59,7 @@ static sigset_t dfl_sig;
 static sigset_t parent_sig;
 
 /* Signal handling thread */
-static thread_ref_t signal_thread;
+static struct thread *signal_thread;
 
 int __attribute__((pure))
 get_signum(const char *sigfunc)
@@ -201,7 +193,7 @@ signal_set(int signo, void (*func) (void *, int), void *v)
 	}
 
 	if (sigaction(signo, &sig, NULL))
-		log_message(LOG_INFO, "sigaction failed for signalfd");
+		log_message(LOG_INFO, "sigaction failed for signo %d", signo);
 
 	if (!func)
 		sigmask_func(SIG_UNBLOCK, &sset, NULL);
@@ -220,7 +212,7 @@ signal_ignore(int signo)
 
 /* Handlers callback  */
 static void
-signal_run_callback(thread_ref_t thread)
+signal_run_callback(struct thread *thread)
 {
 	uint32_t sig;
 	struct signalfd_siginfo siginfo;
@@ -254,7 +246,7 @@ signal_run_callback(thread_ref_t thread)
 #endif
 	}
 
-	signal_thread = thread_add_read(master, signal_run_callback, NULL, thread->u.f.fd, TIMER_NEVER, 0);
+	signal_thread = thread_add_read(thread->master, signal_run_callback, NULL, thread->u.f.fd, TIMER_NEVER, 0);
 }
 
 static void
@@ -268,16 +260,16 @@ clear_signal_handler_addresses(void)
 
 /* Handlers intialization */
 void
-add_signal_read_thread(thread_master_t *thread_master)
+add_signal_read_thread(struct thread_master *m)
 {
-	signal_thread = thread_add_read(thread_master, signal_run_callback, NULL, thread_master->signal_fd, TIMER_NEVER, 0);
+	signal_thread = thread_add_read(m, signal_run_callback, NULL, m->signal_fd, TIMER_NEVER, 0);
 }
 
 void
 cancel_signal_read_thread(void)
 {
 	if (signal_thread) {
-		thread_cancel(signal_thread);
+		thread_del(signal_thread);
 		signal_thread = NULL;
 	}
 }
@@ -294,7 +286,7 @@ open_signal_fd(void)
 	return signal_fd;
 }
 
-static void
+void
 signal_handler_parent_init(void)
 {
 	sigset_t sset;
@@ -348,19 +340,9 @@ signal_handler_init(void)
 {
 	int fd;
 
-#ifdef _ONE_PROCESS_DEBUG_
-	signal_handler_parent_init();
-#else
-	if (prog_type == PROG_TYPE_PARENT)
-		signal_handler_parent_init();
-	else
-		signal_handler_child_init();
-#endif
-
+	signal_handler_child_init();
 	sigemptyset(&parent_sig);
-
 	fd = open_signal_fd();
-
 	clear_signal_handler_addresses();
 
 	return fd;
@@ -386,7 +368,7 @@ void
 signal_handler_destroy(void)
 {
 	if (signal_thread) {
-		thread_cancel(signal_thread);
+		thread_del(signal_thread);
 		signal_thread = NULL;
 	}
 

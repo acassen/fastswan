@@ -2,16 +2,14 @@
 /* Generic vector interface routine
  * Copyright (C) 1997 Kunihiro Ishiguro
  */
-
-#ifndef _VECTOR_H
-#define _VECTOR_H
+#pragma once
 
 /* vector definition */
-typedef struct _vector {
+struct vector {
 	unsigned int	active;
 	unsigned int	allocated;
 	void		**slot;
-} vector_t;
+};
 
 /* Some defines */
 #define VECTOR_DEFAULT_SIZE 1
@@ -24,26 +22,24 @@ typedef struct _vector {
 	for (i = 0; i < (v)->allocated && ((p) = (v)->slot[i]); i++)
 
 /* Prototypes */
-extern vector_t *vector_alloc(void);
-extern vector_t *vector_init(unsigned int);
-extern void vector_alloc_slot(vector_t *);
-extern void vector_insert_slot(vector_t *, int, void *);
-extern vector_t *vector_copy(vector_t *);
-extern void vector_ensure(vector_t *, unsigned int);
-extern int vector_empty_slot(vector_t *);
-extern int vector_set(vector_t *, void *);
-extern void vector_set_slot(vector_t *, void *);
-extern int vector_set_index(vector_t *, unsigned int, const void *);
-extern void *vector_lookup(vector_t *, unsigned int);
-extern void *vector_lookup_ensure(vector_t *, unsigned int);
-extern void vector_unset(vector_t *, unsigned int);
-extern unsigned int vector_count(vector_t *);
-extern void vector_only_wrapper_free(vector_t *);
-extern void vector_only_index_free(void *);
-extern void vector_only_slot_free(void *);
-extern void vector_free(vector_t *);
-extern void vector_dump(vector_t *);
-extern void free_strvec(vector_t *);
-extern void dump_strvec(vector_t *);
-
-#endif
+struct vector *vector_alloc(void);
+struct vector *vector_init(unsigned int size);
+void vector_alloc_slot(struct vector *v);
+void vector_insert_slot(struct vector *v, int index, void *value);
+struct vector *vector_copy(struct vector *v);
+void vector_ensure(struct vector *v, unsigned int num);
+int vector_empty_slot(struct vector *v);
+int vector_set(struct vector *v, void *val);
+void vector_set_slot(struct vector *v, void *val);
+int vector_set_index(struct vector *v, unsigned int i, const void *val);
+void *vector_lookup(struct vector *v, unsigned int i);
+void *vector_lookup_ensure(struct vector *v, unsigned int i);
+void vector_unset(struct vector *v, unsigned int i);
+unsigned int vector_count(struct vector *v);
+void vector_only_wrapper_free(struct vector *v);
+void vector_only_index_free(void *slot);
+void vector_only_slot_free(void *slot);
+void vector_free(struct vector *v);
+void vector_dump(struct vector *v);
+void free_strvec(struct vector *v);
+void dump_strvec(struct vector *v);
