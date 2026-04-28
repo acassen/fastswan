@@ -42,6 +42,7 @@
 #include "thread.h"
 #include "utils.h"
 #include "command.h"
+#include "fswan_cpu.h"
 #include "fswan_data.h"
 #include "fswan_netlink.h"
 #include "fswan_vty_shell.h"
@@ -67,6 +68,7 @@ stop_fswan(void)
 	/* Just cleanup memory & exit */
 	vty_terminate();
 	cmd_terminate();
+	fswan_cpu_destroy();
 	free_daemon_data();
 	thread_destroy_master(master);
 
@@ -91,6 +93,7 @@ start_fswan(void)
 	vty_init();
 	sort_node();
 	fswan_netlink_init();
+	fswan_cpu_init();
 
 	ret = vty_read_config(conf_file, default_conf_file);
 	if (ret < 0) {
