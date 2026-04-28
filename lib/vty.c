@@ -1644,7 +1644,7 @@ vty_listen_unix(struct thread_master *m, const char *path,
 	struct sockaddr_un *addr;
 	struct passwd *pw = NULL;
 	struct group *gr = NULL;
-	int ret, accept_sock;
+	int ret, accept_sock, pathfd;
 	uid_t uid = -1;
 	gid_t gid = -1;
 	mode_t old_mask;
@@ -1692,23 +1692,32 @@ vty_listen_unix(struct thread_master *m, const char *path,
 		goto err;
 	}
 
-	/* Set socket ownership */
-	ret = chown(path, uid, gid);
-	if (ret < 0) {
-		log_message(LOG_INFO, "Vty error cant chown %s (%m)", path);
+	/* Pin the socket inode — O_NOFOLLOW refuses a symlink substitution */
+	pathfd = open(path, O_PATH | O_NOFOLLOW);
+	if (pathfd < 0) {
+		log_message(LOG_INFO, "Vty error opening %s (%m)", path);
 		close(accept_sock);
 		goto err;
 	}
 
-	/* Allow group read/write access */
+	ret = fchown(pathfd, uid, gid);
+	if (ret < 0) {
+		log_message(LOG_INFO, "Vty error cant chown %s (%m)", path);
+		close(pathfd);
+		close(accept_sock);
+		goto err;
+	}
+
 	if (gid != (gid_t)-1) {
-		ret = chmod(path, 0770);
+		ret = fchmod(pathfd, 0770);
 		if (ret < 0) {
 			log_message(LOG_INFO, "Vty error cant chmod %s (%m)", path);
+			close(pathfd);
 			close(accept_sock);
 			goto err;
 		}
 	}
+	close(pathfd);
 
 	ret = listen(accept_sock, 16);
 	if (ret < 0) {
