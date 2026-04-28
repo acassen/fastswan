@@ -303,7 +303,7 @@ fswan_bpf_xfrm_lpm_add(struct fswan_bpf_prog *opts, struct xfrm_policy *p)
 	if (idx < 0)
 		err = (err) ? : fswan_bpf_xfrm_policy_stats_add(opts, &lpm_key);
 
-  end:
+end:
 	FREE(new);
 	return err;
 }
@@ -329,7 +329,7 @@ fswan_bpf_xfrm_lpm_del(struct fswan_bpf_prog *opts, struct xfrm_policy *p)
 				      , pol, sizeof(struct ipv4_xfrm_policy), 0);
 	err = (err) ? : fswan_bpf_xfrm_policy_del(opts, p, pol);
 
-  end:
+end:
 	FREE(pol);
 	return err;
 }
@@ -435,7 +435,7 @@ fswan_bpf_xfrm_policy_counters_vty(struct vty *vty, struct fswan_bpf_prog *opts,
 
 	vty_out(vty, "   %s:\tpkts:%ld bytes:%ld%s", opts->name, pkts, bytes, VTY_NEWLINE);
 
-  end:
+end:
 	free(s);
 	return 0;
 }
@@ -650,7 +650,7 @@ fswan_xfrm_offload_stats_update(struct vty *vty, struct fswan_bpf_prog *opts)
 		if (!rx_pkts && !tx_pkts)
 			continue;
 
-		ifi = fswan_if_get_by_ifindex(s->ifindex);
+		ifi = fswan_if_get_by_ifindex(s->ifindex, false);
 		if (ifi) {
 			ifi->rx_pkts += rx_pkts;
 			ifi->rx_bytes += rx_bytes;

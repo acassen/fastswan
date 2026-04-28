@@ -41,12 +41,13 @@
 #include "thread.h"
 #include "inet_utils.h"
 #include "fswan_data.h"
+#include "fswan_if.h"
 #include "fswan_netlink.h"
 #include "fswan_bpf_xfrm.h"
 
 /* Local data */
 static struct nl_handle nl_kernel = { .fd = -1 };	/* Kernel reflection channel */
-static struct nl_handle nl_cmd = { .fd = -1 };	/* Kernel command channel */
+static struct nl_handle nl_cmd = { .fd = -1 };		/* Kernel command channel */
 
 /* Extern data */
 extern struct data *daemon_data;
@@ -521,21 +522,105 @@ netlink_xfrm_request(struct nl_handle *nl, uint16_t type)
 int
 netlink_xfrm_lookup(void)
 {
+	struct nl_handle nl = { .fd = -1 };
 	int err = 0;
 
-	err = netlink_open(&nl_cmd, daemon_data->nl_rcvbuf_size, SOCK_NONBLOCK, NETLINK_XFRM
-				  , 0, 0);
+	err = netlink_open(&nl, daemon_data->nl_rcvbuf_size, SOCK_NONBLOCK,
+			   NETLINK_XFRM, 0, 0);
 	if (err) {
 		log_message(LOG_INFO, "Error while creating Kernel netlink xfrm channel");
 		return -1;
 	}
 
-	if (netlink_xfrm_request(&nl_cmd, XFRM_MSG_GETPOLICY) < 0 ||
-	    netlink_parse_info(netlink_xfrm_filter, &nl_cmd, NULL, false) < 0)
+	if (netlink_xfrm_request(&nl, XFRM_MSG_GETPOLICY) < 0 ||
+	    netlink_parse_info(netlink_xfrm_filter, &nl, NULL, false) < 0)
 		err = -1;
 
-	netlink_close(&nl_cmd);
+	netlink_close(&nl);
 	return err;
+}
+
+
+/*
+ *	Netlink interface lookup
+ */
+static int
+netlink_if_request(struct nl_handle *nl, unsigned char family, uint16_t type, int ifindex)
+{
+	struct sockaddr_nl snl = { .nl_family = AF_NETLINK };
+	struct {
+		struct nlmsghdr	nlh;
+		struct ifinfomsg i;
+		char		buf[64];
+	} req = {
+		.nlh.nlmsg_len = NLMSG_LENGTH(sizeof req.i),
+		.nlh.nlmsg_flags = (ifindex ? 0 : NLM_F_DUMP) | NLM_F_REQUEST,
+		.nlh.nlmsg_type = type,
+		.nlh.nlmsg_seq = ++nl->seq,
+		.i.ifi_family = family,
+		.i.ifi_index = ifindex,
+	};
+	__u32 filt_mask = RTEXT_FILTER_SKIP_STATS;
+
+	addattr_l(&req.nlh, sizeof req, IFLA_EXT_MASK, &filt_mask, sizeof filt_mask);
+
+	if (sendto(nl->fd, &req, sizeof req, 0,
+		   (struct sockaddr *) &snl, sizeof snl) < 0) {
+		log_message(LOG_INFO, "Netlink: sendto() failed: %m");
+		return -1;
+	}
+	return 0;
+}
+
+static int
+netlink_if_link_filter(__attribute__((unused)) struct sockaddr_nl *snl,
+		       struct nlmsghdr *h)
+{
+	struct ifinfomsg *ifi = NLMSG_DATA(h);
+	struct rtattr *tb[IFLA_MAX + 1];
+	struct interface *iface, *master;
+	int link_ifindex;
+	size_t len;
+
+	if (h->nlmsg_type != RTM_NEWLINK)
+		return 0;
+	if (h->nlmsg_len < NLMSG_LENGTH(sizeof *ifi))
+		return -1;
+	len = h->nlmsg_len - NLMSG_LENGTH(sizeof *ifi);
+
+	parse_rtattr(tb, IFLA_MAX, IFLA_RTA(ifi), len);
+	if (!tb[IFLA_IFNAME])
+		return -1;
+
+	iface = fswan_if_get_by_ifindex(ifi->ifi_index, false);
+	if (!iface) {
+		iface = fswan_if_alloc((char *)RTA_DATA(tb[IFLA_IFNAME]),
+				       ifi->ifi_index);
+		if (!iface)
+			return -1;
+	}
+
+	/* IFLA_LINK: master ifindex, in the same netns */
+	if (tb[IFLA_LINK] && !tb[IFLA_LINK_NETNSID] &&
+	    RTA_PAYLOAD(tb[IFLA_LINK]) == sizeof(uint32_t)) {
+		link_ifindex = *(uint32_t *)RTA_DATA(tb[IFLA_LINK]);
+		if (link_ifindex && link_ifindex != ifi->ifi_index) {
+			master = fswan_if_get_by_ifindex(link_ifindex, true);
+			if (master)
+				fswan_if_link(master, iface);
+		}
+	}
+
+	return 0;
+}
+
+int
+fswan_netlink_if_lookup(int ifindex)
+{
+	if (netlink_if_request(&nl_cmd, AF_PACKET, RTM_GETLINK, ifindex) < 0 ||
+	    netlink_parse_info(netlink_if_link_filter, &nl_cmd, NULL, false) < 0)
+		return -1;
+	return 0;
 }
 
 
@@ -547,11 +632,20 @@ fswan_netlink_init(void)
 {
 	int err;
 
+	/* Persistent NETLINK_ROUTE command channel for on-demand if-lookups. */
+	err = netlink_open(&nl_cmd, daemon_data->nl_rcvbuf_size, SOCK_NONBLOCK,
+			   NETLINK_ROUTE, 0, 0);
+	if (err) {
+		log_message(LOG_INFO, "Error while creating Kernel netlink command channel");
+		return -1;
+	}
+
 	/* Register Kernel netlink reflector */
 	err = netlink_open(&nl_kernel, daemon_data->nl_rcvbuf_size, SOCK_NONBLOCK
 				     , NETLINK_XFRM, XFRMNLGRP_POLICY, 0);
 	if (err) {
 		log_message(LOG_INFO, "Error while registering Kernel netlink reflector channel");
+		netlink_close(&nl_cmd);
 		return -1;
 	}
 
@@ -566,5 +660,6 @@ fswan_netlink_destroy(void)
 {
 	log_message(LOG_INFO, "Unregistering Kernel netlink reflector");
 	netlink_close(&nl_kernel);
+	netlink_close(&nl_cmd);
 	return 0;
 }
