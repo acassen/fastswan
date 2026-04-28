@@ -21,18 +21,158 @@
  * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
 
+/* system includes */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 /* local includes */
 #include "bitops.h"
 #include "list_head.h"
 #include "vty.h"
 #include "command.h"
+#include "ethtool.h"
+#include "pci.h"
 #include "fswan_data.h"
 #include "fswan_if.h"
+#include "fswan_if_rxq.h"
 #include "fswan_bpf_prog.h"
 
 
 /* Extern data */
 extern struct data *daemon_data;
+
+
+/*
+ *	Pretty-printers
+ */
+static void
+bw_format(uint64_t bps, char *buf, size_t len)
+{
+	if (bps >= 1000000000ULL)
+		snprintf(buf, len, "%.2fGbps", (double)bps / 1e9);
+	else if (bps >= 1000000ULL)
+		snprintf(buf, len, "%.2fMbps", (double)bps / 1e6);
+	else if (bps >= 1000ULL)
+		snprintf(buf, len, "%.2fKbps", (double)bps / 1e3);
+	else
+		snprintf(buf, len, "%llubps", (unsigned long long)bps);
+}
+
+static void
+pps_format(uint64_t pps, char *buf, size_t len)
+{
+	if (pps >= 1000000ULL)
+		snprintf(buf, len, "%.2fMpps", (double)pps / 1e6);
+	else if (pps >= 1000ULL)
+		snprintf(buf, len, "%.2fKpps", (double)pps / 1e3);
+	else
+		snprintf(buf, len, "%llupps", (unsigned long long)pps);
+}
+
+static int
+fswan_if_stats_show_summary(struct interface *iface, void *arg)
+{
+	const struct ethtool_phy_stats *s = &iface->phy_stats;
+	struct vty *vty = arg;
+	char rxbw[20], txbw[20], rxpps[20], txpps[20];
+
+	bw_format(iface->rx_bw_bps, rxbw, sizeof(rxbw));
+	bw_format(iface->tx_bw_bps, txbw, sizeof(txbw));
+	pps_format(iface->rx_pps, rxpps, sizeof(rxpps));
+	pps_format(iface->tx_pps, txpps, sizeof(txpps));
+	vty_out(vty, "%-16s  %14llu  %14llu  %14llu  %14llu  %14s  %14s  %14s  %14s%s",
+		iface->ifname,
+		(unsigned long long)s->rx_packets,
+		(unsigned long long)s->tx_packets,
+		(unsigned long long)s->rx_bytes,
+		(unsigned long long)s->tx_bytes,
+		rxbw, txbw, rxpps, txpps, VTY_NEWLINE);
+	return 0;
+}
+
+static void
+fswan_if_stats_show_detail(struct vty *vty, struct interface *iface)
+{
+	const struct ethtool_phy_stats *p = &iface->phy_stats;
+	char rxbw[20], txbw[20], rxpps[20], txpps[20];
+	uint32_t q, nr;
+	int *cpu_per_q;
+
+	bw_format(iface->rx_bw_bps, rxbw, sizeof(rxbw));
+	bw_format(iface->tx_bw_bps, txbw, sizeof(txbw));
+	pps_format(iface->rx_pps, rxpps, sizeof(rxpps));
+	pps_format(iface->tx_pps, txpps, sizeof(txpps));
+
+	vty_out(vty, "Interface %s%s", iface->ifname, VTY_NEWLINE);
+	vty_out(vty, "  PHY counters:%s", VTY_NEWLINE);
+	vty_out(vty, "    %-24s %-14llu  %-24s %llu%s",
+		"rx_packets:", (unsigned long long)p->rx_packets,
+		"tx_packets:", (unsigned long long)p->tx_packets, VTY_NEWLINE);
+	vty_out(vty, "    %-24s %-14llu  %-24s %llu%s",
+		"rx_bytes:", (unsigned long long)p->rx_bytes,
+		"tx_bytes:", (unsigned long long)p->tx_bytes, VTY_NEWLINE);
+	vty_out(vty, "    %-24s %-14llu  %-24s %llu%s",
+		"rx_discards:", (unsigned long long)p->rx_discards,
+		"tx_discards:", (unsigned long long)p->tx_discards, VTY_NEWLINE);
+	vty_out(vty, "    %-24s %llu%s",
+		"tx_errors:", (unsigned long long)p->tx_errors, VTY_NEWLINE);
+	vty_out(vty, "  Bandwidth: rx:%s  tx:%s  |  PPS: rx:%s  tx:%s%s",
+		rxbw, txbw, rxpps, txpps, VTY_NEWLINE);
+
+	if (!iface->queue_stats || !(iface->nr_rx_queues | iface->nr_tx_queues)) {
+		vty_out(vty, "%s", VTY_NEWLINE);
+		return;
+	}
+
+	nr = iface->nr_rx_queues > iface->nr_tx_queues ?
+	     iface->nr_rx_queues : iface->nr_tx_queues;
+	cpu_per_q = calloc(nr, sizeof(*cpu_per_q));
+	if (!cpu_per_q) {
+		vty_out(vty, "%s", VTY_NEWLINE);
+		return;
+	}
+	memset(cpu_per_q, -1, nr * sizeof(*cpu_per_q));
+	fswan_if_rxq_cpu(iface, cpu_per_q, nr);
+
+	vty_out(vty, "  Per-queue counters:%s", VTY_NEWLINE);
+	vty_out(vty, "    %3s  %4s  %14s  %14s  %12s  %14s  %14s%s",
+		"q", "cpu", "rx_packets", "rx_bytes", "rx_xdp_drop",
+		"tx_packets", "tx_bytes", VTY_NEWLINE);
+	for (q = 0; q < nr; q++) {
+		const struct ethtool_q_stats *qs = &iface->queue_stats[q];
+		vty_out(vty, "    %3u  %4d  %14llu  %14llu  %12llu  %14llu  %14llu%s",
+			q, cpu_per_q[q],
+			(unsigned long long)qs->rx_packets,
+			(unsigned long long)qs->rx_bytes,
+			(unsigned long long)qs->rx_xdp_drop,
+			(unsigned long long)qs->tx_packets,
+			(unsigned long long)qs->tx_bytes, VTY_NEWLINE);
+	}
+	free(cpu_per_q);
+	vty_out(vty, "%s", VTY_NEWLINE);
+}
+
+static int
+fswan_if_show(struct interface *iface, void *arg)
+{
+	struct vty *vty = arg;
+
+	vty_out(vty, "interface %s {%s%s }%s"
+		   , iface->ifname
+		   , __test_bit(FSWAN_INTERFACE_FL_SHUTDOWN_BIT, &iface->flags) ?
+		     " shutdown" : ""
+		   , __test_bit(FSWAN_INTERFACE_FL_RUNNING_BIT, &iface->flags) ?
+		     " running" : ""
+		   , VTY_NEWLINE);
+	vty_out(vty, " ifindex:%d%s", iface->ifindex, VTY_NEWLINE);
+	if (iface->description[0])
+		vty_out(vty, " description: %s%s", iface->description, VTY_NEWLINE);
+	if (iface->bpf_prog)
+		vty_out(vty, " bpf-program: %s%s", iface->bpf_prog->name, VTY_NEWLINE);
+	vty_out(vty, "%s", VTY_NEWLINE);
+	return 0;
+}
 
 
 /*
@@ -183,6 +323,120 @@ DEFUN(if_no_shutdown,
 
 
 /*
+ *	Show commands
+ */
+DEFUN(show_interface,
+      show_interface_cmd,
+      "show interface [STRING]",
+      SHOW_STR
+      "Dump declared interfaces; with a name, dump that interface only\n"
+      "Interface name\n")
+{
+	struct interface *iface;
+
+	if (argc >= 1) {
+		iface = fswan_if_get(argv[0], false);
+		if (!iface) {
+			vty_out(vty, "%% Unknown interface '%s'%s"
+				   , argv[0], VTY_NEWLINE);
+			return CMD_WARNING;
+		}
+		fswan_if_show(iface, vty);
+		return CMD_SUCCESS;
+	}
+
+	fswan_if_foreach(fswan_if_show, vty);
+	return CMD_SUCCESS;
+}
+
+DEFUN(show_interface_stats_all,
+      show_interface_stats_all_cmd,
+      "show interface statistics",
+      SHOW_STR
+      "Interface\n"
+      "Dump cumulative ethtool PHY counters and current rates for every"
+      " declared interface\n")
+{
+	vty_out(vty, "%-16s  %14s  %14s  %14s  %14s  %14s  %14s  %14s  %14s%s",
+		"Interface", "rx-packets", "tx-packets",
+		"rx-bytes", "tx-bytes", "rx-bw", "tx-bw",
+		"rx-pps", "tx-pps", VTY_NEWLINE);
+	vty_out(vty, "%-16s  %14s  %14s  %14s  %14s  %14s  %14s  %14s  %14s%s",
+		"----------------", "--------------", "--------------",
+		"--------------", "--------------",
+		"--------------", "--------------",
+		"--------------", "--------------", VTY_NEWLINE);
+	fswan_if_foreach(fswan_if_stats_show_summary, vty);
+	return CMD_SUCCESS;
+}
+
+DEFUN(show_interface_stats,
+      show_interface_stats_cmd,
+      "show interface statistics WORD",
+      SHOW_STR
+      "Interface\n"
+      "Dump per-interface ethtool PHY counters, derived rates and"
+      " per-queue stats with the CPU each queue's IRQ is pinned to\n"
+      "Interface name\n")
+{
+	struct interface *iface = fswan_if_get(argv[0], false);
+
+	if (!iface) {
+		vty_out(vty, "%% Unknown interface '%s'%s", argv[0], VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+
+	fswan_if_stats_show_detail(vty, iface);
+	return CMD_SUCCESS;
+}
+
+DEFUN(show_interface_rxq_topology,
+      show_interface_rxq_topology_cmd,
+      "show interface rx-queue topology",
+      SHOW_STR
+      "Interface\n"
+      "Dump RX queue IRQ affinity grouped by NUMA node, plus a diagnostic"
+      " of single-CPU pinning and per-CPU uniqueness\n")
+{
+	fswan_if_rxq_show(vty);
+	return CMD_SUCCESS;
+}
+
+DEFUN(show_interface_topology,
+      show_interface_topology_cmd,
+      "show interface topology",
+      SHOW_STR
+      "Interface\n"
+      "Enumerate every PCI ethernet adapter on the host and group them by"
+      " NUMA node, showing each device's BDF, vendor:device ID and bound"
+      " driver\n")
+{
+	struct pci_eth_dev *devs;
+	int ndevs;
+
+	devs = calloc(PCI_MAX_ETH_DEVS, sizeof(*devs));
+	if (!devs)
+		return CMD_WARNING;
+
+	ndevs = pci_eth_dev_fetch(devs, PCI_MAX_ETH_DEVS);
+	if (ndevs < 0) {
+		vty_out(vty, "%% cannot enumerate PCI devices%s", VTY_NEWLINE);
+		free(devs);
+		return CMD_WARNING;
+	}
+	if (!ndevs) {
+		vty_out(vty, "No PCI ethernet devices found%s", VTY_NEWLINE);
+		free(devs);
+		return CMD_SUCCESS;
+	}
+
+	pci_eth_dev_vty(vty, devs, ndevs);
+	free(devs);
+	return CMD_SUCCESS;
+}
+
+
+/*
  *	Configuration writer
  */
 static int
@@ -222,6 +476,17 @@ cmd_ext_interface_install(void)
 	install_element(INTERFACE_NODE, &no_if_bpf_program_cmd);
 	install_element(INTERFACE_NODE, &if_shutdown_cmd);
 	install_element(INTERFACE_NODE, &if_no_shutdown_cmd);
+
+	install_element(VIEW_NODE, &show_interface_cmd);
+	install_element(VIEW_NODE, &show_interface_stats_all_cmd);
+	install_element(VIEW_NODE, &show_interface_stats_cmd);
+	install_element(VIEW_NODE, &show_interface_rxq_topology_cmd);
+	install_element(VIEW_NODE, &show_interface_topology_cmd);
+	install_element(ENABLE_NODE, &show_interface_cmd);
+	install_element(ENABLE_NODE, &show_interface_stats_all_cmd);
+	install_element(ENABLE_NODE, &show_interface_stats_cmd);
+	install_element(ENABLE_NODE, &show_interface_rxq_topology_cmd);
+	install_element(ENABLE_NODE, &show_interface_topology_cmd);
 
 	return 0;
 }
