@@ -137,6 +137,12 @@ timer_long(timeval_t a)
 	return (unsigned long)a.tv_sec * TIMER_HZ + (unsigned long)a.tv_usec;
 }
 
+static inline uint64_t
+timespec_to_ns(const struct timespec *ts)
+{
+	return (uint64_t)ts->tv_sec * NSEC_PER_SEC + ts->tv_nsec;
+}
+
 /* prototypes */
 int monotonic_gettimeofday(timeval_t *now);
 void timespec_add_now_ms(struct timespec *t, timeval_t *now, unsigned long ms);

@@ -34,6 +34,7 @@
 #include <linux/perf_event.h>
 
 #include "cpu.h"
+#include "timer.h"
 #include "logger.h"
 
 /* perf read layout when PERF_FORMAT_TOTAL_TIME_ENABLED is set */

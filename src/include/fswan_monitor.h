@@ -22,47 +22,6 @@
  */
 #pragma once
 
-#include <stdint.h>
-#include "ethtool.h"
-#include "gauge.h"
-
-#define ETHTOOL_POLL_TICKS	15		/* 3 seconds at 5 Hz polling */
-
-struct fswan_percpu_metrics {
-	float			load;			/* [0.0, 1.0] */
-	float			load_ewma;		/* EWMA-smoothed load */
-	struct gauge_history	load_history;
-
-	/* Accumulation fields: zeroed before each ethtool tick. */
-	struct ethtool_q_stats	q_stats;
-
-	/* Rate estimates derived from q_stats deltas. */
-	uint64_t		rx_bw_bps;
-	uint64_t		tx_bw_bps;
-	uint64_t		total_bw_bps;
-	uint64_t		rx_pps;
-	uint64_t		tx_pps;
-	uint64_t		rx_buff_alloc_err_rate;
-
-	/* EWMA-smoothed traffic rates */
-	double			rx_bw_bps_ewma;
-	double			tx_bw_bps_ewma;
-	double			total_bw_bps_ewma;
-	double			rx_pps_ewma;
-	double			tx_pps_ewma;
-
-	/* Traffic rate history (fed every ethtool tick, ~3s per sample) */
-	struct gauge_history	bw_history;
-	struct gauge_history	pps_history;
-
-	struct ethtool_q_stats	prev_q_stats;
-};
-
 /* Prototypes */
-int fswan_percpu_init(void);
-void fswan_percpu_destroy(void);
-void fswan_percpu_reset(void);
-void fswan_percpu_collect_all(void);
-void fswan_percpu_rates_update(uint64_t now_ns);
-void fswan_percpu_load_update_all(void);
-struct fswan_percpu_metrics *fswan_percpu_metrics_get(int cpu);
+int fswan_monitor_init(void);
+int fswan_monitor_destroy(void);
