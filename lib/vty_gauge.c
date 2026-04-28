@@ -127,25 +127,6 @@ ratio_color(float ratio)
 }
 
 
-/*
- *	History ring buffer
- */
-void
-gauge_history_push(struct gauge_history *h, float ratio)
-{
-	h->samples[h->head] = ratio;
-	h->head = (h->head + 1) % GAUGE_HISTORY_MAX;
-	if (h->count < GAUGE_HISTORY_MAX)
-		h->count++;
-}
-
-/* Return the i oldest sample (0 = oldest). */
-float
-gauge_history_get(const struct gauge_history *h, int i)
-{
-	int idx = (h->head - h->count + i + GAUGE_HISTORY_MAX) % GAUGE_HISTORY_MAX;
-	return h->samples[idx];
-}
 
 
 /*

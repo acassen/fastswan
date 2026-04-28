@@ -4,6 +4,7 @@ lib_src = files(
   'addr.c',
   'cpu.c',
   'ethtool.c',
+  'gauge.c',
   'buffer.c',
   'command.c',
   'daemon.c',

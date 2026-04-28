@@ -27,7 +27,6 @@
 #include "logger.h"
 #include "utils.h"
 #include "thread.h"
-#include "vty_gauge.h"
 #include "cpu.h"
 #include "ethtool.h"
 #include "fswan_data.h"

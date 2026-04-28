@@ -22,48 +22,17 @@
  */
 #pragma once
 
-#include <stdint.h>
-#include "ethtool.h"
-#include "gauge.h"
+/* Default EWMA smoothing factor */
+#define EWMA_DEFAULT_ALPHA	0.2f
 
-#define ETHTOOL_POLL_TICKS	15		/* 3 seconds at 5 Hz polling */
-
-struct fswan_percpu_metrics {
-	float			load;			/* [0.0, 1.0] */
-	float			load_ewma;		/* EWMA-smoothed load */
-	struct gauge_history	load_history;
-
-	/*
-	 * Accumulation fields: zeroed before each ethtool tick.
-	 */
-	struct ethtool_q_stats	q_stats;
-
-	/*
-	 * Persistent fields: survive across ticks.
-	 * Rate estimates derived from q_stats deltas.
-	 */
-	uint64_t		rx_bw_bps;
-	uint64_t		tx_bw_bps;
-	uint64_t		total_bw_bps;
-	uint64_t		rx_pps;
-	uint64_t		tx_pps;
-	uint64_t		rx_buff_alloc_err_rate;
-
-	/* EWMA-smoothed traffic rates */
-	double			rx_bw_bps_ewma;
-	double			tx_bw_bps_ewma;
-	double			total_bw_bps_ewma;
-	double			rx_pps_ewma;
-	double			tx_pps_ewma;
-
-	/* Traffic rate history (fed every ethtool tick, ~3s per sample) */
-	struct gauge_history	bw_history;		/* total_bw_bps normalized */
-	struct gauge_history	pps_history;		/* rx_pps + tx_pps normalized */
-
-	struct ethtool_q_stats	prev_q_stats;
+/* History ring buffer */
+#define GAUGE_HISTORY_MAX	256
+struct gauge_history {
+	float		samples[GAUGE_HISTORY_MAX];
+	int		head;		/* index of next write slot */
+	int		count;		/* number of valid samples, up to GAUGE_HISTORY_MAX */
 };
 
 /* Prototypes */
-int fswan_cpu_init(void);
-int fswan_cpu_destroy(void);
-struct fswan_percpu_metrics *fswan_percpu_metrics_get(int cpu);
+void gauge_history_push(struct gauge_history *h, float ratio);
+float gauge_history_get(const struct gauge_history *h, int i);

@@ -20,50 +20,25 @@
  *
  * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
-#pragma once
 
-#include <stdint.h>
-#include "ethtool.h"
 #include "gauge.h"
 
-#define ETHTOOL_POLL_TICKS	15		/* 3 seconds at 5 Hz polling */
 
-struct fswan_percpu_metrics {
-	float			load;			/* [0.0, 1.0] */
-	float			load_ewma;		/* EWMA-smoothed load */
-	struct gauge_history	load_history;
+/*
+ *	Gauge hepers
+ */
+void
+gauge_history_push(struct gauge_history *h, float ratio)
+{
+	h->samples[h->head] = ratio;
+	h->head = (h->head + 1) % GAUGE_HISTORY_MAX;
+	if (h->count < GAUGE_HISTORY_MAX)
+		h->count++;
+}
 
-	/*
-	 * Accumulation fields: zeroed before each ethtool tick.
-	 */
-	struct ethtool_q_stats	q_stats;
-
-	/*
-	 * Persistent fields: survive across ticks.
-	 * Rate estimates derived from q_stats deltas.
-	 */
-	uint64_t		rx_bw_bps;
-	uint64_t		tx_bw_bps;
-	uint64_t		total_bw_bps;
-	uint64_t		rx_pps;
-	uint64_t		tx_pps;
-	uint64_t		rx_buff_alloc_err_rate;
-
-	/* EWMA-smoothed traffic rates */
-	double			rx_bw_bps_ewma;
-	double			tx_bw_bps_ewma;
-	double			total_bw_bps_ewma;
-	double			rx_pps_ewma;
-	double			tx_pps_ewma;
-
-	/* Traffic rate history (fed every ethtool tick, ~3s per sample) */
-	struct gauge_history	bw_history;		/* total_bw_bps normalized */
-	struct gauge_history	pps_history;		/* rx_pps + tx_pps normalized */
-
-	struct ethtool_q_stats	prev_q_stats;
-};
-
-/* Prototypes */
-int fswan_cpu_init(void);
-int fswan_cpu_destroy(void);
-struct fswan_percpu_metrics *fswan_percpu_metrics_get(int cpu);
+float
+gauge_history_get(const struct gauge_history *h, int i)
+{
+	int idx = (h->head - h->count + i + GAUGE_HISTORY_MAX) % GAUGE_HISTORY_MAX;
+	return h->samples[idx];
+}

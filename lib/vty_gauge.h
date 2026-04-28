@@ -23,7 +23,7 @@
 
 #pragma once
 
-#include <stdint.h>
+#include "gauge.h"
 #include "vty.h"
 
 /* Color modes */
@@ -41,14 +41,6 @@ enum gauge_style {
 	GAUGE_DOT,		/* filled/empty circles ●/○, color-coded */
 	GAUGE_BLOCK_GRAPH,	/* scrolling ▁▂▃▄▅▆▇█ graph, color-coded */
 	GAUGE_BRAILLE_GRAPH,	/* 2×4 braille dot graph, color-coded */
-};
-
-/* History ring buffer for time-sliding graphs */
-#define GAUGE_HISTORY_MAX	256
-struct gauge_history {
-	float		samples[GAUGE_HISTORY_MAX];
-	int		head;		/* index of next write slot */
-	int		count;		/* number of valid samples, up to GAUGE_HISTORY_MAX */
 };
 
 /* Per-command display options — caller-allocated, opaque to vty. */
@@ -69,8 +61,6 @@ struct matrix_entry;
 
 /* Prototypes */
 const char *vty_ratio_color(float ratio, enum gauge_color_mode mode);
-void gauge_history_push(struct gauge_history *h, float ratio);
-float gauge_history_get(const struct gauge_history *h, int i);
 enum gauge_style gauge_style_parse(const char *s);
 struct gauge_opts *gauge_opts_alloc(enum gauge_style style);
 void vty_gauge_emit(struct vty *vty, const char *label, float ratio,
