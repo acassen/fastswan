@@ -38,7 +38,7 @@ struct cpu_load *cpu_load;
 /* double-buffer: poll thread writes to percpu_back, then flips percpu_front.
  * Readers acquire percpu_front atomically. */
 static struct fswan_percpu_metrics *percpu_back;
-static struct fswan_percpu_metrics * _Atomic percpu_front;
+static struct fswan_percpu_metrics *percpu_front;
 static uint64_t percpu_prev_ts_ns;
 
 /* Extern data */
