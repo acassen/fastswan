@@ -27,6 +27,7 @@
 #include <net/if.h>
 
 #include "list_head.h"
+#include "ethtool.h"
 
 /* Forward declarations */
 struct bpf_link;
@@ -44,16 +45,37 @@ struct interface {
 	int			ifindex;
 	char			description[128];
 
+	/* point to real device if it's a virtual device */
+	struct interface	*link_iface;
+
 	/* attached BPF program */
 	struct fswan_bpf_prog	*bpf_prog;
 	struct list_head	bpf_prog_list;	/* in bpf_prog->iface_bind_list */
 	struct bpf_link		*bpf_xdp_lnk;
 
-	/* statistics */
+	/* xfrm-offload aggregate counters (BPF map readback) */
 	uint64_t		rx_pkts;
 	uint64_t		rx_bytes;
 	uint64_t		tx_pkts;
 	uint64_t		tx_bytes;
+
+	/* ethtool PHY counters + derived rates (refreshed every ETHTOOL_POLL_TICKS) */
+	struct ethtool_phy_stats phy_stats;
+	uint64_t		rx_bw_bps;
+	uint64_t		tx_bw_bps;
+	uint64_t		rx_pps;
+	uint64_t		tx_pps;
+	uint64_t		prev_rx_bytes;
+	uint64_t		prev_tx_bytes;
+	uint64_t		prev_rx_packets;
+	uint64_t		prev_tx_packets;
+	uint64_t		prev_ts_ns;
+
+	/* per-queue ethtool stats; array of max(nr_rx_queues, nr_tx_queues) */
+	uint32_t		nr_rx_queues;
+	uint32_t		nr_tx_queues;
+	struct ethtool_q_stats	*queue_stats;
+	struct ethtool_cache	*ethtool_cache;
 
 	unsigned long		flags;
 	struct list_head	next;		/* in daemon_data->interfaces */
@@ -63,6 +85,8 @@ struct interface {
 /* Prototypes */
 struct interface *fswan_if_alloc(const char *name, int ifindex);
 struct interface *fswan_if_get(const char *name, bool alloc);
-struct interface *fswan_if_get_by_ifindex(int ifindex);
+struct interface *fswan_if_get_by_ifindex(int ifindex, bool alloc);
+void fswan_if_link(struct interface *master, struct interface *slave);
 void fswan_if_destroy(struct interface *iface);
 void fswan_if_destroy_all(void);
+void fswan_if_foreach(int (*hdl)(struct interface *, void *), void *arg);

@@ -22,15 +22,19 @@
  */
 
 /* global includes */
+#include <stdlib.h>
 #include <string.h>
 #include <net/if.h>
 
 /* local includes */
 #include "memory.h"
 #include "bitops.h"
+#include "utils.h"
 #include "list_head.h"
+#include "ethtool.h"
 #include "fswan_data.h"
 #include "fswan_if.h"
+#include "fswan_netlink.h"
 #include "fswan_bpf_prog.h"
 
 
@@ -44,7 +48,7 @@ extern struct data *daemon_data;
  *	enters the `interface NAME` block.
  */
 struct interface *
-fswan_if_get_by_ifindex(int ifindex)
+fswan_if_get_by_ifindex(int ifindex, bool alloc)
 {
 	struct interface *iface;
 
@@ -55,6 +59,10 @@ fswan_if_get_by_ifindex(int ifindex)
 		if (iface->ifindex == ifindex)
 			return iface;
 	}
+
+	if (alloc && !fswan_netlink_if_lookup(ifindex))
+		return fswan_if_get_by_ifindex(ifindex, false);
+
 	return NULL;
 }
 
@@ -62,6 +70,7 @@ struct interface *
 fswan_if_alloc(const char *name, int ifindex)
 {
 	struct interface *new;
+	uint32_t nr_rx = 0, nr_tx = 0, nr;
 
 	PMALLOC(new);
 	strlcpy(new->ifname, name, IF_NAMESIZE);
@@ -69,6 +78,14 @@ fswan_if_alloc(const char *name, int ifindex)
 	INIT_LIST_HEAD(&new->bpf_prog_list);
 	INIT_LIST_HEAD(&new->next);
 	__set_bit(FSWAN_INTERFACE_FL_SHUTDOWN_BIT, &new->flags);
+
+	ethtool_get_nr_queues(name, &nr_rx, &nr_tx);
+	nr = max(nr_rx, nr_tx);
+	if (nr) {
+		new->queue_stats = calloc(nr, sizeof(*new->queue_stats));
+		new->nr_rx_queues = nr_rx;
+		new->nr_tx_queues = nr_tx;
+	}
 
 	list_add_tail(&new->next, &daemon_data->interfaces);
 	return new;
@@ -89,19 +106,41 @@ fswan_if_get(const char *name, bool alloc)
 		return NULL;
 
 	ifindex = if_nametoindex(name);
-	if (!ifindex)
-		return NULL;
+	if (ifindex && !fswan_netlink_if_lookup(ifindex))
+		return fswan_if_get_by_ifindex(ifindex, false);
 
-	return fswan_if_alloc(name, ifindex);
+	return NULL;
+}
+
+void
+fswan_if_link(struct interface *master, struct interface *slave)
+{
+	slave->link_iface = master;
 }
 
 void
 fswan_if_destroy(struct interface *iface)
 {
+	struct interface *child;
+
 	if (iface->bpf_prog) {
 		fswan_bpf_prog_detach(iface->bpf_prog, iface);
 		list_head_del(&iface->bpf_prog_list);
 		iface->bpf_prog = NULL;
+	}
+
+	if (iface->ethtool_cache) {
+		ethtool_gstats_cache_destroy(iface->ethtool_cache);
+		iface->ethtool_cache = NULL;
+	}
+	if (iface->queue_stats) {
+		free(iface->queue_stats);
+		iface->queue_stats = NULL;
+	}
+
+	list_for_each_entry(child, &daemon_data->interfaces, next) {
+		if (child->link_iface == iface)
+			child->link_iface = NULL;
 	}
 
 	list_head_del(&iface->next);
@@ -115,4 +154,13 @@ fswan_if_destroy_all(void)
 
 	list_for_each_entry_safe(iface, tmp, &daemon_data->interfaces, next)
 		fswan_if_destroy(iface);
+}
+
+void
+fswan_if_foreach(int (*hdl)(struct interface *, void *), void *arg)
+{
+	struct interface *iface;
+
+	list_for_each_entry(iface, &daemon_data->interfaces, next)
+		(*hdl)(iface, arg);
 }
