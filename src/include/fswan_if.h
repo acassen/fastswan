@@ -37,6 +37,7 @@ struct fswan_bpf_prog;
 enum fswan_interface_flags {
 	FSWAN_INTERFACE_FL_SHUTDOWN_BIT,
 	FSWAN_INTERFACE_FL_RUNNING_BIT,
+	FSWAN_INTERFACE_FL_DESTROYING_BIT,
 };
 
 /* Types */
@@ -90,3 +91,4 @@ void fswan_if_link(struct interface *master, struct interface *slave);
 void fswan_if_destroy(struct interface *iface);
 void fswan_if_destroy_all(void);
 void fswan_if_foreach(int (*hdl)(struct interface *, void *), void *arg);
+int fswan_if_collect(struct interface *iface, void *arg);

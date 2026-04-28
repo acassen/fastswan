@@ -65,4 +65,5 @@ void fswan_percpu_reset(void);
 void fswan_percpu_collect_all(void);
 void fswan_percpu_rates_update(uint64_t now_ns);
 void fswan_percpu_load_update_all(void);
-struct fswan_percpu_metrics *fswan_percpu_metrics_get(int cpu);
+void fswan_percpu_publish(void);
+const struct fswan_percpu_metrics *fswan_percpu_metrics_get(int cpu);

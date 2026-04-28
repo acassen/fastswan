@@ -25,6 +25,7 @@
 #include <string.h>
 #include "logger.h"
 #include "utils.h"
+#include "bitops.h"
 #include "cpu.h"
 #include "gauge.h"
 #include "ethtool.h"
@@ -34,7 +35,10 @@
 
 /* Local data */
 struct cpu_load *cpu_load;
-static struct fswan_percpu_metrics *percpu_metrics;
+/* double-buffer: poll thread writes to percpu_back, then flips percpu_front.
+ * Readers acquire percpu_front atomically. */
+static struct fswan_percpu_metrics *percpu_back;
+static struct fswan_percpu_metrics * _Atomic percpu_front;
 static uint64_t percpu_prev_ts_ns;
 
 /* Extern data */
@@ -49,10 +53,8 @@ fswan_percpu_reset_accum(void)
 {
 	int i;
 
-	for (i = 0; i < cpu_load->nr_cpus; i++) {
-		struct fswan_percpu_metrics *m = &percpu_metrics[i];
-		memset(&m->q_stats, 0, sizeof(m->q_stats));
-	}
+	for (i = 0; i < cpu_load->nr_cpus; i++)
+		memset(&percpu_back[i].q_stats, 0, sizeof(percpu_back[i].q_stats));
 }
 
 static int
@@ -62,6 +64,8 @@ fswan_percpu_collect(struct interface *iface, __attribute__((unused)) void *arg)
 	uint32_t q, nr;
 	int cpu;
 
+	if (__test_bit(FSWAN_INTERFACE_FL_DESTROYING_BIT, &iface->flags))
+		return 0;
 	if (!iface->queue_stats)
 		return 0;
 
@@ -75,17 +79,20 @@ fswan_percpu_collect(struct interface *iface, __attribute__((unused)) void *arg)
 		cpu = (q < iface->nr_rx_queues) ? cpu_per_q[q] : -1;
 		if (cpu < 0 || cpu >= cpu_load->nr_cpus)
 			continue;
-		ethtool_q_stats_add(&percpu_metrics[cpu].q_stats, s);
+		ethtool_q_stats_add(&percpu_back[cpu].q_stats, s);
 	}
 	return 0;
 }
 
-struct fswan_percpu_metrics *
+const struct fswan_percpu_metrics *
 fswan_percpu_metrics_get(int cpu)
 {
-	if (!percpu_metrics || cpu < 0 || cpu >= cpu_load->nr_cpus)
+	struct fswan_percpu_metrics *m;
+
+	m = __atomic_load_n(&percpu_front, __ATOMIC_ACQUIRE);
+	if (!m || cpu < 0 || cpu >= cpu_load->nr_cpus)
 		return NULL;
-	return &percpu_metrics[cpu];
+	return &m[cpu];
 }
 
 void
@@ -108,21 +115,21 @@ fswan_percpu_rates_update(uint64_t now_ns)
 	int i;
 
 	for (i = 0; i < cpu_load->nr_cpus; i++) {
-		m = &percpu_metrics[i];
+		m = &percpu_back[i];
 
 		if (elapsed && percpu_prev_ts_ns) {
 			m->rx_bw_bps = (m->q_stats.rx_bytes - m->prev_q_stats.rx_bytes)
-				       * 1000000000ULL / elapsed;
+				       * NSEC_PER_SEC / elapsed;
 			m->tx_bw_bps = (m->q_stats.tx_bytes - m->prev_q_stats.tx_bytes)
-				       * 1000000000ULL / elapsed;
+				       * NSEC_PER_SEC / elapsed;
 			m->total_bw_bps = m->rx_bw_bps + m->tx_bw_bps;
 			m->rx_pps = (m->q_stats.rx_packets - m->prev_q_stats.rx_packets)
-				    * 1000000000ULL / elapsed;
+				    * NSEC_PER_SEC / elapsed;
 			m->tx_pps = (m->q_stats.tx_packets - m->prev_q_stats.tx_packets)
-				    * 1000000000ULL / elapsed;
+				    * NSEC_PER_SEC / elapsed;
 			m->rx_buff_alloc_err_rate = (m->q_stats.rx_buff_alloc_err
 						     - m->prev_q_stats.rx_buff_alloc_err)
-						    * 1000000000ULL / elapsed;
+						    * NSEC_PER_SEC / elapsed;
 		}
 		m->rx_bw_bps_ewma = EWMA_DEFAULT_ALPHA * m->rx_bw_bps
 				   + (1.0 - EWMA_DEFAULT_ALPHA) * m->rx_bw_bps_ewma;
@@ -146,12 +153,13 @@ fswan_percpu_rates_update(uint64_t now_ns)
 void
 fswan_percpu_load_update_all(void)
 {
+	struct fswan_percpu_metrics *m;
 	float load;
 	int i;
 
 	cpu_load_update(cpu_load);
 	for (i = 0; i < cpu_load->nr_cpus; i++) {
-		struct fswan_percpu_metrics *m = &percpu_metrics[i];
+		m = &percpu_back[i];
 
 		load = cpu_load_get(cpu_load, i);
 		if (load < 0.0f)
@@ -161,6 +169,15 @@ fswan_percpu_load_update_all(void)
 		m->load_ewma = EWMA_DEFAULT_ALPHA * load
 			     + (1.0f - EWMA_DEFAULT_ALPHA) * m->load_ewma;
 	}
+}
+
+void
+fswan_percpu_publish(void)
+{
+	struct fswan_percpu_metrics *tmp;
+
+	tmp = __atomic_exchange_n(&percpu_front, percpu_back, __ATOMIC_RELEASE);
+	percpu_back = tmp;
 }
 
 
@@ -176,8 +193,15 @@ fswan_percpu_init(void)
 		return -1;
 	}
 
-	percpu_metrics = calloc(cpu_load->nr_cpus, sizeof(*percpu_metrics));
-	if (!percpu_metrics) {
+	percpu_front = calloc(cpu_load->nr_cpus, sizeof(*percpu_front));
+	if (!percpu_front) {
+		cpu_load_destroy(cpu_load);
+		return -1;
+	}
+
+	percpu_back = calloc(cpu_load->nr_cpus, sizeof(*percpu_back));
+	if (!percpu_back) {
+		free(percpu_front);
 		cpu_load_destroy(cpu_load);
 		return -1;
 	}
@@ -188,6 +212,8 @@ void
 fswan_percpu_destroy(void)
 {
 	cpu_load_destroy(cpu_load);
-	free(percpu_metrics);
-	percpu_metrics = NULL;
+	free(percpu_front);
+	percpu_front = NULL;
+	free(percpu_back);
+	percpu_back = NULL;
 }

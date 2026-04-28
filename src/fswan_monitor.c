@@ -22,48 +22,90 @@
  */
 
 #include <time.h>
+#include <unistd.h>
+#include <pthread.h>
 #include "logger.h"
-#include "thread.h"
+#include "timer.h"
 #include "fswan_if.h"
-#include "fswan_if_ethtool.h"
 #include "fswan_cpu.h"
 #include "fswan_monitor.h"
 
-/* Local data */
-static int ethtool_tick;
+#define MONITOR_POLL_NS		200000000ULL	/* 200 ms poll interval in nanoseconds */
+#define ETHTOOL_POLL_TICKS	15		/* 3 seconds at 5 Hz polling */
 
-/* Extern data */
-extern struct thread_master *master;
+/* Local data */
+static pthread_t		poll_thread;
+static volatile int		poll_stop;
+static volatile int		poll_foreach_active;
+static int			poll_thread_running;
+
+
+/*
+ *	Interface quiesce: spin until the poll thread is not walking the
+ *	interface list. Called by fswan_if_destroy() before list_del()/free().
+ */
+void
+fswan_monitor_iface_quiesce(void)
+{
+	if (!poll_thread_running)
+		return;
+	while (__sync_fetch_and_add(&poll_foreach_active, 0))
+		usleep(1000);
+}
 
 
 /*
  *	Polling thread
  */
 static void
-fswan_monitor_poll(__attribute__((unused)) struct thread *t)
+fswan_monitor_collect(uint64_t now_ns)
 {
-	struct timespec ts;
-	uint64_t now_ns;
+	static int ethtool_tick;
 
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	now_ns = timespec_to_ns(&ts);
-
-	fswan_percpu_reset();
-
+	__sync_add_and_fetch(&poll_foreach_active, 1);
 	if (++ethtool_tick >= ETHTOOL_POLL_TICKS) {
 		ethtool_tick = 0;
 		fswan_if_foreach(fswan_if_collect, &now_ns);
 		fswan_percpu_collect_all();
+	}
+	__sync_sub_and_fetch(&poll_foreach_active, 1);
+}
 
-		/* Re-read clock to exclude syscall latency from rate calc. */
+static void *
+fswan_monitor_poll_thread(__attribute__((unused)) void *arg)
+{
+	struct timespec ts, next;
+	uint64_t now_ns;
+
+	clock_gettime(CLOCK_MONOTONIC, &next);
+
+	for (;;) {
+		next.tv_nsec += MONITOR_POLL_NS;
+		if (next.tv_nsec >= NSEC_PER_SEC) {
+			next.tv_nsec -= NSEC_PER_SEC;
+			next.tv_sec++;
+		}
+		clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+
+		if (poll_stop)
+			break;
+
 		clock_gettime(CLOCK_MONOTONIC, &ts);
 		now_ns = timespec_to_ns(&ts);
+
+		fswan_percpu_reset();
+		fswan_monitor_collect(now_ns);
+
+		/* Re-read clock to exclude collection latency from rate calc */
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		now_ns = timespec_to_ns(&ts);
+
 		fswan_percpu_rates_update(now_ns);
+		fswan_percpu_load_update_all();
+		fswan_percpu_publish();
 	}
 
-	fswan_percpu_load_update_all();
-
-	thread_add_timer(master, fswan_monitor_poll, NULL, TIMER_HZ / 5);
+	return NULL;
 }
 
 
@@ -79,13 +121,24 @@ fswan_monitor_init(void)
 		return -1;
 	}
 
-	thread_add_event(master, fswan_monitor_poll, NULL, 0);
+	if (pthread_create(&poll_thread, NULL, fswan_monitor_poll_thread, NULL)) {
+		log_message(LOG_INFO, "%s(): Error creating poll thread (%m)"
+				    , __FUNCTION__);
+		fswan_percpu_destroy();
+		return -1;
+	}
+	poll_thread_running = 1;
 	return 0;
 }
 
 int
 fswan_monitor_destroy(void)
 {
+	if (poll_thread_running) {
+		poll_stop = 1;
+		pthread_join(poll_thread, NULL);
+		poll_thread_running = 0;
+	}
 	fswan_percpu_destroy();
 	return 0;
 }

@@ -25,3 +25,4 @@
 /* Prototypes */
 int fswan_monitor_init(void);
 int fswan_monitor_destroy(void);
+void fswan_monitor_iface_quiesce(void);

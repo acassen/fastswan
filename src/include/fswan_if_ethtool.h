@@ -25,4 +25,4 @@
 #include "fswan_if.h"
 
 /* Prototypes */
-int fswan_if_collect(struct interface *iface, void *arg);
+int fswan_if_collect_ethtool(struct interface *iface, uint64_t now_ns);

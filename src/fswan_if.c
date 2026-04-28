@@ -34,7 +34,9 @@
 #include "ethtool.h"
 #include "fswan_data.h"
 #include "fswan_if.h"
+#include "fswan_if_ethtool.h"
 #include "fswan_netlink.h"
+#include "fswan_monitor.h"
 #include "fswan_bpf_prog.h"
 
 
@@ -43,9 +45,8 @@ extern struct data *daemon_data;
 
 
 /*
- *	Interface registry: declared interfaces only (gtp-guard style).
- *	ifindex is resolved lazily via if_nametoindex when the operator
- *	enters the `interface NAME` block.
+ * ifindex is resolved lazily via if_nametoindex when the operator
+ * enters the `interface NAME` block.
  */
 struct interface *
 fswan_if_get_by_ifindex(int ifindex, bool alloc)
@@ -123,6 +124,9 @@ fswan_if_destroy(struct interface *iface)
 {
 	struct interface *child;
 
+	__set_bit(FSWAN_INTERFACE_FL_DESTROYING_BIT, &iface->flags);
+	fswan_monitor_iface_quiesce();
+
 	if (iface->bpf_prog) {
 		fswan_bpf_prog_detach(iface->bpf_prog, iface);
 		list_head_del(&iface->bpf_prog_list);
@@ -163,4 +167,10 @@ fswan_if_foreach(int (*hdl)(struct interface *, void *), void *arg)
 
 	list_for_each_entry(iface, &daemon_data->interfaces, next)
 		(*hdl)(iface, arg);
+}
+
+int
+fswan_if_collect(struct interface *iface, void *arg)
+{
+	return fswan_if_collect_ethtool(iface, *(uint64_t *)arg);
 }

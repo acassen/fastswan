@@ -30,7 +30,7 @@
 /*
  *	Interface ethtool stats collection
  */
-static int
+int
 fswan_if_collect_ethtool(struct interface *iface, uint64_t now_ns)
 {
 	struct ethtool_cache *c = iface->ethtool_cache;
@@ -88,8 +88,3 @@ fswan_if_collect_ethtool(struct interface *iface, uint64_t now_ns)
 	return 0;
 }
 
-int
-fswan_if_collect(struct interface *iface, void *arg)
-{
-	return fswan_if_collect_ethtool(iface, *(uint64_t *)arg);
-}
