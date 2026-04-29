@@ -126,6 +126,7 @@ fswan_if_destroy(struct interface *iface)
 
 	__set_bit(FSWAN_INTERFACE_FL_DESTROYING_BIT, &iface->flags);
 	fswan_monitor_iface_quiesce();
+	list_head_del(&iface->next);
 
 	if (iface->bpf_prog) {
 		fswan_bpf_prog_detach(iface->bpf_prog, iface);
@@ -147,7 +148,6 @@ fswan_if_destroy(struct interface *iface)
 			child->link_iface = NULL;
 	}
 
-	list_head_del(&iface->next);
 	FREE(iface);
 }
 
@@ -172,5 +172,7 @@ fswan_if_foreach(int (*hdl)(struct interface *, void *), void *arg)
 int
 fswan_if_collect(struct interface *iface, void *arg)
 {
+	if (__test_bit(FSWAN_INTERFACE_FL_DESTROYING_BIT, &iface->flags))
+		return 0;
 	return fswan_if_collect_ethtool(iface, *(uint64_t *)arg);
 }
