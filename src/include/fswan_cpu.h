@@ -26,7 +26,6 @@
 #include "ethtool.h"
 #include "gauge.h"
 
-#define ETHTOOL_POLL_TICKS	15		/* 3 seconds at 5 Hz polling */
 
 struct fswan_percpu_metrics {
 	float			load;			/* [0.0, 1.0] */
@@ -61,8 +60,7 @@ struct fswan_percpu_metrics {
 /* Prototypes */
 int fswan_percpu_init(void);
 void fswan_percpu_destroy(void);
-void fswan_percpu_reset(void);
-void fswan_percpu_collect_all(void);
+void fswan_percpu_sample_all(uint64_t now_ns);
 void fswan_percpu_rates_update(uint64_t now_ns);
 void fswan_percpu_load_update_all(void);
 void fswan_percpu_publish(void);

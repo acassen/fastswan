@@ -26,7 +26,6 @@
 #include <pthread.h>
 #include "logger.h"
 #include "timer.h"
-#include "fswan_if.h"
 #include "fswan_cpu.h"
 #include "fswan_monitor.h"
 
@@ -34,10 +33,10 @@
 #define ETHTOOL_POLL_TICKS	15		/* 3 seconds at 5 Hz polling */
 
 /* Local data */
-static pthread_t		poll_thread;
-static volatile int		poll_stop;
-static volatile int		poll_foreach_active;
-static int			poll_thread_running;
+static pthread_t poll_thread;
+static volatile int poll_stop;
+static volatile int poll_foreach_active;
+static int poll_thread_running;
 
 
 /*
@@ -57,50 +56,36 @@ fswan_monitor_iface_quiesce(void)
 /*
  *	Polling thread
  */
-static void
-fswan_monitor_collect(uint64_t now_ns)
-{
-	static int ethtool_tick;
-
-	__sync_add_and_fetch(&poll_foreach_active, 1);
-	if (++ethtool_tick >= ETHTOOL_POLL_TICKS) {
-		ethtool_tick = 0;
-		fswan_if_foreach(fswan_if_collect, &now_ns);
-		fswan_percpu_collect_all();
-	}
-	__sync_sub_and_fetch(&poll_foreach_active, 1);
-}
-
 static void *
 fswan_monitor_poll_thread(__attribute__((unused)) void *arg)
 {
-	struct timespec ts, next;
+	struct timespec next;
+	static int ethtool_tick;
 	uint64_t now_ns;
 
 	clock_gettime(CLOCK_MONOTONIC, &next);
 
 	for (;;) {
-		next.tv_nsec += MONITOR_POLL_NS;
-		if (next.tv_nsec >= NSEC_PER_SEC) {
-			next.tv_nsec -= NSEC_PER_SEC;
-			next.tv_sec++;
-		}
+		timespec_add_ns(&next, MONITOR_POLL_NS);
 		clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
 
 		if (poll_stop)
 			break;
 
-		clock_gettime(CLOCK_MONOTONIC, &ts);
-		now_ns = timespec_to_ns(&ts);
+		if (++ethtool_tick >= ETHTOOL_POLL_TICKS) {
+			now_ns = clock_gettime_ns(CLOCK_MONOTONIC);
+			ethtool_tick = 0;
 
-		fswan_percpu_reset();
-		fswan_monitor_collect(now_ns);
+			__sync_add_and_fetch(&poll_foreach_active, 1);
+			fswan_percpu_sample_all(now_ns);
+			__sync_sub_and_fetch(&poll_foreach_active, 1);
 
-		/* Re-read clock to exclude collection latency from rate calc */
-		clock_gettime(CLOCK_MONOTONIC, &ts);
-		now_ns = timespec_to_ns(&ts);
+			/* Re-read clock to exclude collection latency
+			 * from rate calc */
+			now_ns = clock_gettime_ns(CLOCK_MONOTONIC);
+			fswan_percpu_rates_update(now_ns);
+		}
 
-		fswan_percpu_rates_update(now_ns);
 		fswan_percpu_load_update_all();
 		fswan_percpu_publish();
 	}

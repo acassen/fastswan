@@ -25,6 +25,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <limits.h>
+#include <time.h>
 #include <sys/time.h>
 
 #include "rbtree.h"
@@ -141,6 +142,25 @@ static inline uint64_t
 timespec_to_ns(const struct timespec *ts)
 {
 	return (uint64_t)ts->tv_sec * NSEC_PER_SEC + ts->tv_nsec;
+}
+
+static inline void
+timespec_add_ns(struct timespec *ts, uint64_t ns)
+{
+	ts->tv_nsec += ns;
+	if (ts->tv_nsec >= NSEC_PER_SEC) {
+		ts->tv_nsec -= NSEC_PER_SEC;
+		ts->tv_sec++;
+	}
+}
+
+static inline uint64_t
+clock_gettime_ns(clockid_t clk)
+{
+	struct timespec ts;
+
+	clock_gettime(clk, &ts);
+	return (uint64_t)ts.tv_sec * NSEC_PER_SEC + ts.tv_nsec;
 }
 
 /* prototypes */

@@ -34,7 +34,6 @@
 #include "ethtool.h"
 #include "fswan_data.h"
 #include "fswan_if.h"
-#include "fswan_if_ethtool.h"
 #include "fswan_netlink.h"
 #include "fswan_monitor.h"
 #include "fswan_bpf_prog.h"
@@ -167,12 +166,4 @@ fswan_if_foreach(int (*hdl)(struct interface *, void *), void *arg)
 
 	list_for_each_entry(iface, &daemon_data->interfaces, next)
 		(*hdl)(iface, arg);
-}
-
-int
-fswan_if_collect(struct interface *iface, void *arg)
-{
-	if (__test_bit(FSWAN_INTERFACE_FL_DESTROYING_BIT, &iface->flags))
-		return 0;
-	return fswan_if_collect_ethtool(iface, *(uint64_t *)arg);
 }

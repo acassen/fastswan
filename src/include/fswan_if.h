@@ -91,4 +91,3 @@ void fswan_if_link(struct interface *master, struct interface *slave);
 void fswan_if_destroy(struct interface *iface);
 void fswan_if_destroy_all(void);
 void fswan_if_foreach(int (*hdl)(struct interface *, void *), void *arg);
-int fswan_if_collect(struct interface *iface, void *arg);

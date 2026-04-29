@@ -30,6 +30,7 @@
 #include "gauge.h"
 #include "ethtool.h"
 #include "fswan_if.h"
+#include "fswan_if_ethtool.h"
 #include "fswan_if_rxq.h"
 #include "fswan_cpu.h"
 
@@ -47,18 +48,12 @@ extern struct data *daemon_data;
 
 /*
  *	Per-CPU workload aggregation
+ *
+ * Fetch ethtool stats for one interface and accumulate per-queue counters
+ * into the per-CPU back buffer, using IRQ affinity to map {queue,cpu}.
  */
-static void
-fswan_percpu_reset_accum(void)
-{
-	int i;
-
-	for (i = 0; i < cpu_load->nr_cpus; i++)
-		memset(&percpu_back[i].q_stats, 0, sizeof(percpu_back[i].q_stats));
-}
-
 static int
-fswan_percpu_collect(struct interface *iface, __attribute__((unused)) void *arg)
+fswan_iface_sample(struct interface *iface, void *arg)
 {
 	int cpu_per_q[iface->nr_rx_queues ? : 1];
 	uint32_t q, nr;
@@ -67,6 +62,8 @@ fswan_percpu_collect(struct interface *iface, __attribute__((unused)) void *arg)
 	if (__test_bit(FSWAN_INTERFACE_FL_DESTROYING_BIT, &iface->flags))
 		return 0;
 	if (!iface->queue_stats)
+		return 0;
+	if (fswan_if_collect_ethtool(iface, *(uint64_t *)arg) < 0)
 		return 0;
 
 	nr = max(iface->nr_rx_queues, iface->nr_tx_queues);
@@ -96,15 +93,13 @@ fswan_percpu_metrics_get(int cpu)
 }
 
 void
-fswan_percpu_reset(void)
+fswan_percpu_sample_all(uint64_t now_ns)
 {
-	fswan_percpu_reset_accum();
-}
+	int i;
 
-void
-fswan_percpu_collect_all(void)
-{
-	fswan_if_foreach(fswan_percpu_collect, NULL);
+	for (i = 0; i < cpu_load->nr_cpus; i++)
+		memset(&percpu_back[i].q_stats, 0, sizeof(percpu_back[i].q_stats));
+	fswan_if_foreach(fswan_iface_sample, &now_ns);
 }
 
 void
