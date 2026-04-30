@@ -831,10 +831,10 @@ thread_fetch_next_queue(struct thread_master *m)
 			}
 		}
 
-		/* Move any expired timers to the ready queue. */
-		thread_timer_expired(m);
-
-		/* Handle epoll events */
+		/* Handle epoll events first. data-ready or error wins over a
+		 * concurrent timeout in the same wake-up. The thread is removed
+		 * from its rbtree by thread_move_ready() and so is invisible to
+		 * the timer walk below. */
 		for (i = 0; i < ret; i++) {
 			struct epoll_event *ep_ev;
 			struct thread_event *ev;
@@ -881,6 +881,9 @@ thread_fetch_next_queue(struct thread_master *m)
 				}
 			}
 		}
+
+		/* Move still-expired timers to the ready queue. */
+		thread_timer_expired(m);
 
 		/* If there is a ready thread, return it. */
 		if (!list_empty(&m->ready))
