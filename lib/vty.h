@@ -88,6 +88,7 @@ struct vty {
 	unsigned long		v_timeout;			/* Timeout seconds */
 	struct sockaddr_storage	address;			/* What address is this vty comming from. */
 	void			*priv;				/* Per-session private data */
+	struct ucred		peer_cred;			/* Unix peer credentials (pid/uid/gid) */
 };
 
 /* Embed as the first member of any streaming context stored in vty->priv. */
@@ -197,6 +198,7 @@ ssize_t vty_send_out(struct vty *vty, const char *fmt, ...) PRINTF_ATTRIBUTE(2, 
 void vty_prompt_hold(struct vty *vty);
 void vty_prompt_restore(struct vty *vty);
 void vty_read_resume(struct vty *vty);
+const char *vty_identity(struct vty *vty, char *buf, size_t len);
 int vty_read_config(char *config_file, char *config_default_dir);
 void vty_time_print(struct vty *vty, int cr);
 void vty_close(struct vty *vty);

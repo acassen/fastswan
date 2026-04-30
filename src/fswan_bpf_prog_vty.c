@@ -31,7 +31,6 @@
 #include "list_head.h"
 #include "logger.h"
 #include "memory.h"
-#include "inet_utils.h"
 #include "thread.h"
 #include "vty.h"
 #include "command.h"
@@ -62,7 +61,7 @@ bpf_trace_pipe_stop(struct vty *vty)
 	char addr[INET6_ADDRSTRLEN];
 
 	log_message(LOG_INFO, "BPF trace-pipe streaming stopped (vty:%s)",
-		    inet_sockaddrtos2(&vty->address, addr));
+		    vty_identity(vty, addr, sizeof(addr)));
 	thread_del(ctx->t_trace);
 	close(ctx->trace_fd);
 	vty->priv = NULL;
@@ -132,7 +131,7 @@ DEFUN(debug_xdp_bpf_trace_pipe,
 
 	char addr[INET6_ADDRSTRLEN];
 	log_message(LOG_INFO, "BPF trace-pipe streaming started (vty:%s)",
-		    inet_sockaddrtos2(&vty->address, addr));
+		    vty_identity(vty, addr, sizeof(addr)));
 	vty_out(vty, "Streaming BPF trace output... (Ctrl-C to stop)%s", VTY_NEWLINE);
 	return CMD_SUCCESS;
 }

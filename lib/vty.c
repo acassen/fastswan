@@ -1564,38 +1564,35 @@ vty_create(struct thread_master *m, int vty_sock, struct sockaddr_storage *addr)
 static void
 vty_accept(struct thread *t)
 {
-	struct sockaddr_storage sock;
-	struct sockaddr *saddr = (struct sockaddr *) THREAD_ARG(t);
-	socklen_t len;
-	int vty_sock, ret;
-	unsigned int on = 1;
+	struct sockaddr_storage sock = {};
+	socklen_t len = sizeof(sock);
 	int accept_sock = THREAD_FD(t);
+	int vty_sock, on = 1;
+	struct vty *v;
+	socklen_t clen;
 
-	/* Re-arm the listener for the next connection. */
 	vty_event(t->master, VTY_SERV, accept_sock, t->arg);
 
-	/* We can handle IPv4 or IPv6 socket. */
-	memset(&sock, 0, sizeof(struct sockaddr_storage));
-	len = sizeof(struct sockaddr_storage);
 	vty_sock = accept4(accept_sock, (struct sockaddr *) &sock, &len, SOCK_NONBLOCK);
 	if (vty_sock < 0) {
-		log_message(LOG_WARNING, "can't accept vty socket : %s"
-				       , strerror(errno));
+		log_message(LOG_WARNING, "can't accept vty socket : %m");
 		return;
 	}
 
-	if (saddr->sa_family == AF_UNIX) {
-		log_message(LOG_INFO, "Vty unix connection accepted");
-		goto end;
+	if (((struct sockaddr *) THREAD_ARG(t))->sa_family == AF_UNIX) {
+		v = vty_create(t->master, vty_sock, &sock);
+		if (v) {
+			clen = sizeof(v->peer_cred);
+			getsockopt(vty_sock, SOL_SOCKET, SO_PEERCRED, &v->peer_cred, &clen);
+			log_message(LOG_INFO, "Vty unix connection from pid:%d uid:%d"
+					    , v->peer_cred.pid, v->peer_cred.uid);
+		}
+		return;
 	}
 
-	ret = setsockopt(vty_sock, IPPROTO_TCP, TCP_NODELAY,
-			 (char *) &on, sizeof(on));
-	if (ret < 0)
+	if (setsockopt(vty_sock, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on)) < 0)
 		log_message(LOG_INFO, "can't set sockopt to vty_sock : %m");
 	log_message(LOG_INFO, "Vty connection from %s", inet_sockaddrtos(&sock));
-
-end:
 	vty_create(t->master, vty_sock, &sock);
 }
 
@@ -1788,6 +1785,18 @@ vty_close(struct vty *vty)
 
 	/* OK free vty. */
 	FREE(vty);
+}
+
+/* Return a human-readable peer identity "pid:N uid:N" for Unix, IP for TCP. */
+const char *
+vty_identity(struct vty *vty, char *buf, size_t len)
+{
+	if (vty->peer_cred.pid) {
+		snprintf(buf, len, "pid:%d uid:%d",
+			 vty->peer_cred.pid, vty->peer_cred.uid);
+		return buf;
+	}
+	return inet_sockaddrtos2(&vty->address, buf);
 }
 
 /* Re-register the VTY read thread after external suspension. */
@@ -2036,12 +2045,11 @@ DEFUN(config_who,
 	struct vty *v;
 
 	for (i = 0; i < vector_active(vtyvec); i++) {
-		if ((v = vector_slot(vtyvec, i)) != NULL) {
-			vty_out(vty, "%svty[%d] connected from %s.%s"
-				   , v->config ? "*" : " "
-				   , i, inet_sockaddrtos2(&v->address, ipaddr)
+		if ((v = vector_slot(vtyvec, i)) != NULL)
+			vty_out(vty, "%svty[%d] connected from %s%s"
+				   , v->config ? "*" : " ", i
+				   , vty_identity(v, ipaddr, sizeof(ipaddr))
 				   , VTY_NEWLINE);
-		}
 	}
 	return CMD_SUCCESS;
 }
