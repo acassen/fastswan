@@ -254,7 +254,7 @@ vty_prompt(struct vty *vty)
 	struct utsname names;
 	const char *hostname = NULL;
 
-	if (vty->type == VTY_TERM && vty->status != VTY_HOLD) {
+	if (vty->type == VTY_TERM && vty->status != VTY_HOLD && vty->status != VTY_STREAM) {
 		hostname = host.name;
 		if (!hostname) {
 			uname(&names);
@@ -1212,6 +1212,8 @@ vty_read(struct thread *t)
 	int vty_sock = THREAD_FD(t);
 	struct vty *vty = THREAD_ARG(t);
 
+	vty->t_read = NULL;
+
 	/* Read Timeout means idle connection */
 	if (t->type == THREAD_READ_TIMEOUT) {
 		buffer_reset(vty->obuf);
@@ -1234,6 +1236,21 @@ vty_read(struct thread *t)
 		}
 		buffer_reset(vty->obuf);
 		vty->status = VTY_CLOSE;
+		if (vty->priv)
+			((struct vty_stream *)vty->priv)->stop(vty);
+	}
+
+	/* In streaming mode scan for Ctrl-C only, discard all other input. */
+	if (vty->status == VTY_STREAM) {
+		for (i = 0; i < nbytes; i++) {
+			if (buf[i] == CONTROL('C')) {
+				((struct vty_stream *)vty->priv)->stop(vty);
+				return;
+			}
+		}
+		vty->t_read = thread_add_read(t->master, vty_read, vty,
+					      vty_sock, TIMER_NEVER, 0);
+		return;
 	}
 
 	for (i = 0; i < nbytes; i++) {
@@ -1451,7 +1468,8 @@ vty_flush(struct thread *t)
 			break;
 		}
 
-		vty->status = VTY_NORMAL;
+		if (vty->status != VTY_STREAM)
+			vty->status = VTY_NORMAL;
 		if (vty->lines == 0)
 			vty_event(t->master, VTY_READ, vty_sock, vty);
 		break;

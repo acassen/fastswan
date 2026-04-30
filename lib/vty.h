@@ -37,7 +37,8 @@ enum vty_status {
 	VTY_CLOSE,
 	VTY_MORE,
 	VTY_MORELINE,
-	VTY_HOLD
+	VTY_HOLD,
+	VTY_STREAM,
 };
 
 
@@ -87,6 +88,11 @@ struct vty {
 	unsigned long		v_timeout;			/* Timeout seconds */
 	struct sockaddr_storage	address;			/* What address is this vty comming from. */
 	void			*priv;				/* Per-session private data */
+};
+
+/* Embed as the first member of any streaming context stored in vty->priv. */
+struct vty_stream {
+	void (*stop)(struct vty *);
 };
 
 /* Small macro to determine newline is newline only or linefeed needed. */

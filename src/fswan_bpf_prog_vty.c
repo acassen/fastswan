@@ -21,17 +21,121 @@
  * Copyright (C) 2025-2026 Alexandre Cassen, <acassen@gmail.com>
  */
 
+/* system includes */
+#include <fcntl.h>
+#include <string.h>
+#include <unistd.h>
+
 /* local includes */
 #include "bitops.h"
 #include "list_head.h"
+#include "logger.h"
+#include "memory.h"
+#include "inet_utils.h"
+#include "thread.h"
 #include "vty.h"
 #include "command.h"
 #include "fswan_data.h"
 #include "fswan_bpf_prog.h"
 
+#define BPF_TRACE_PIPE	"/sys/kernel/debug/tracing/trace_pipe"
 
 /* Extern data */
 extern struct data *daemon_data;
+extern struct thread_master *master;
+
+
+/*
+ *	BPF trace-pipe streaming
+ */
+struct bpf_trace_ctx {
+	struct vty_stream stream;	/* must be first */
+	int		trace_fd;
+	struct vty	*vty;
+	struct thread	*t_trace;
+};
+
+static void
+bpf_trace_pipe_stop(struct vty *vty)
+{
+	struct bpf_trace_ctx *ctx = vty->priv;
+	char addr[INET6_ADDRSTRLEN];
+
+	log_message(LOG_INFO, "BPF trace-pipe streaming stopped (vty:%s)",
+		    inet_sockaddrtos2(&vty->address, addr));
+	thread_del(ctx->t_trace);
+	close(ctx->trace_fd);
+	vty->priv = NULL;
+	FREE(ctx);
+	if (vty->status == VTY_CLOSE)
+		return;
+	vty_prompt_restore(vty);
+	vty_read_resume(vty);
+}
+
+static int
+bpf_trace_vty_write(int fd, const char *buf, size_t len)
+{
+	const char *p, *start = buf, *end = buf + len;
+
+	while ((p = memchr(start, '\n', end - start))) {
+		if (write(fd, start, p - start) < 0 || write(fd, "\r\n", 2) < 0)
+			return -1;
+		start = p + 1;
+	}
+	return (start < end) ? (int)write(fd, start, end - start) : 0;
+}
+
+static void
+bpf_trace_pipe_read(struct thread *t)
+{
+	struct bpf_trace_ctx *ctx = THREAD_ARG(t);
+	char buf[4096];
+	ssize_t n;
+
+	ctx->t_trace = NULL;
+	while ((n = read(ctx->trace_fd, buf, sizeof(buf))) > 0) {
+		if (bpf_trace_vty_write(ctx->vty->fd, buf, n) < 0) {
+			ctx->stream.stop(ctx->vty);
+			return;
+		}
+	}
+	ctx->t_trace = thread_add_read(master, bpf_trace_pipe_read, ctx,
+				       ctx->trace_fd, TIMER_NEVER, 0);
+}
+
+DEFUN(debug_xdp_bpf_trace_pipe,
+      debug_xdp_bpf_trace_pipe_cmd,
+      "debug xdp bpf trace-pipe",
+      "Debugging\n"
+      "XDP subsystem\n"
+      "BPF programs\n"
+      "Stream bpf_printk() output from the kernel trace pipe (Ctrl-C to stop)\n")
+{
+	struct bpf_trace_ctx *ctx;
+	int fd;
+
+	fd = open(BPF_TRACE_PIPE, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0) {
+		vty_out(vty, "%% Cannot open %s (%m)%s", BPF_TRACE_PIPE, VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+
+	PMALLOC(ctx);
+	ctx->stream.stop = bpf_trace_pipe_stop;
+	ctx->trace_fd = fd;
+	ctx->vty = vty;
+	ctx->t_trace = thread_add_read(master, bpf_trace_pipe_read, ctx,
+				       fd, TIMER_NEVER, 0);
+	vty->priv = ctx;
+	vty->status = VTY_STREAM;
+
+	char addr[INET6_ADDRSTRLEN];
+	log_message(LOG_INFO, "BPF trace-pipe streaming started (vty:%s)",
+		    inet_sockaddrtos2(&vty->address, addr));
+	vty_out(vty, "Streaming BPF trace output... (Ctrl-C to stop)%s", VTY_NEWLINE);
+	return CMD_SUCCESS;
+}
 
 
 /*
@@ -186,6 +290,9 @@ bpf_prog_config_write(struct vty *vty)
 static int
 cmd_ext_bpf_prog_install(void)
 {
+	install_element(VIEW_NODE, &debug_xdp_bpf_trace_pipe_cmd);
+	install_element(ENABLE_NODE, &debug_xdp_bpf_trace_pipe_cmd);
+
 	install_element(CONFIG_NODE, &bpf_program_cmd);
 	install_element(CONFIG_NODE, &no_bpf_program_cmd);
 
