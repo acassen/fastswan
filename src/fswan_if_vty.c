@@ -304,14 +304,8 @@ DEFUN(if_no_shutdown,
 {
 	struct interface *iface = vty->index;
 
-	if (!iface->bpf_prog) {
-		vty_out(vty, "%% No bpf-program bound to %s; configure"
-			     " `bpf-program NAME` first%s"
-			   , iface->ifname, VTY_NEWLINE);
-		return CMD_WARNING;
-	}
-
-	if (fswan_bpf_prog_attach(iface->bpf_prog, iface)) {
+	if (iface->bpf_prog &&
+	    fswan_bpf_prog_attach(iface->bpf_prog, iface)) {
 		vty_out(vty, "%% Failed to attach bpf-program '%s' to %s%s"
 			   , iface->bpf_prog->name, iface->ifname, VTY_NEWLINE);
 		return CMD_WARNING;

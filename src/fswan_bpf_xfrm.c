@@ -374,9 +374,7 @@ fswan_bpf_xfrm_lpm_action(int action, struct fswan_bpf_prog *opts, struct xfrm_p
 int
 fswan_bpf_xfrm_action(int action, struct xfrm_policy *p)
 {
-	struct list_head *l = &daemon_data->bpf_progs;
-	struct fswan_bpf_prog *opts;
-	int err;
+	struct interface *iface;
 
 	/* If daemon is currently stopping, we simply skip action on ruleset.
 	 * This reduce daemon exit time and entries are properly released during
@@ -391,15 +389,11 @@ fswan_bpf_xfrm_action(int action, struct xfrm_policy *p)
 	if (p->family != AF_INET)
 		return -1;
 
-	/* perform action on every loaded bpf prog */
-	list_for_each_entry(opts, l, next) {
-		err = fswan_bpf_xfrm_lpm_action(action, opts, p);
-		if (err) {
-			return -1;
-		}
-	}
+	iface = fswan_if_get_by_ifindex(p->ifindex, false);
+	if (!iface || !iface->bpf_prog)
+		return 0;
 
-	return 0;
+	return fswan_bpf_xfrm_lpm_action(action, iface->bpf_prog, p);
 }
 
 static int

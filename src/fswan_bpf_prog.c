@@ -81,6 +81,21 @@ fswan_bpf_prog_alloc(const char *name)
 
 
 /*
+ *	Helpers
+ */
+static int
+fswan_bpf_prog_any_loaded(void)
+{
+	struct fswan_bpf_prog *p;
+
+	list_for_each_entry(p, &daemon_data->bpf_progs, next)
+		if (!__test_bit(FSWAN_BPF_PROG_FL_SHUTDOWN_BIT, &p->flags))
+			return 1;
+	return 0;
+}
+
+
+/*
  *	BPF object load helpers
  */
 static void
@@ -176,6 +191,7 @@ fswan_bpf_prog_load(struct fswan_bpf_prog *p)
 
 	__clear_bit(FSWAN_BPF_PROG_FL_SHUTDOWN_BIT, &p->flags);
 	__clear_bit(FSWAN_BPF_PROG_FL_LOAD_ERR_BIT, &p->flags);
+	__set_bit(FSWAN_FL_XDP_XFRM_LOADED_BIT, &daemon_data->flags);
 	log_message(LOG_INFO, "bpf-program '%s': loaded from %s", p->name, p->path);
 	return 0;
 }
@@ -201,6 +217,8 @@ fswan_bpf_prog_unload(struct fswan_bpf_prog *p)
 	}
 
 	__set_bit(FSWAN_BPF_PROG_FL_SHUTDOWN_BIT, &p->flags);
+	if (!fswan_bpf_prog_any_loaded())
+		__clear_bit(FSWAN_FL_XDP_XFRM_LOADED_BIT, &daemon_data->flags);
 	log_message(LOG_INFO, "bpf-program '%s': unloaded", p->name);
 }
 
