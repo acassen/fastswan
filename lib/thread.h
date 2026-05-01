@@ -160,6 +160,7 @@ struct thread *thread_add_write(struct thread_master *m,
 				void (*func)(struct thread *), void *arg,
 				int fd, unsigned long timer, unsigned flags);
 void thread_close_fd(struct thread *t);
+void thread_event_purge_fd(struct thread_master *m, int fd);
 struct thread *thread_add_timer_uval(struct thread_master *m,
 				     void (*func)(struct thread *), void *arg,
 				     unsigned val, uint64_t timer);

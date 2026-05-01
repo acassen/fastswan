@@ -195,6 +195,7 @@ struct vty *vty_new(void);
 int vty_out(struct vty *vty, const char *fmt, ...) PRINTF_ATTRIBUTE(2, 3);
 int vty_brd_out(const char *fmt, ...);
 ssize_t vty_send_out(struct vty *vty, const char *fmt, ...) PRINTF_ATTRIBUTE(2, 3);
+int vty_async_write(struct vty *vty, const void *buf, size_t len);
 void vty_prompt_hold(struct vty *vty);
 void vty_prompt_restore(struct vty *vty);
 void vty_read_resume(struct vty *vty);

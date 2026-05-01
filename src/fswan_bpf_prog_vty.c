@@ -66,23 +66,32 @@ bpf_trace_pipe_stop(struct vty *vty)
 	close(ctx->trace_fd);
 	vty->priv = NULL;
 	FREE(ctx);
+
 	if (vty->status == VTY_CLOSE)
 		return;
+
+	if (vty->t_write) {
+		thread_del(vty->t_write);
+		vty->t_write = NULL;
+	}
+
+	buffer_reset(vty->obuf);
 	vty_prompt_restore(vty);
 	vty_read_resume(vty);
 }
 
 static int
-bpf_trace_vty_write(int fd, const char *buf, size_t len)
+bpf_trace_vty_write(struct vty *vty, const char *buf, size_t len)
 {
 	const char *p, *start = buf, *end = buf + len;
 
 	while ((p = memchr(start, '\n', end - start))) {
-		if (write(fd, start, p - start) < 0 || write(fd, "\r\n", 2) < 0)
+		if (vty_async_write(vty, start, p - start) < 0 ||
+		    vty_async_write(vty, "\r\n", 2) < 0)
 			return -1;
 		start = p + 1;
 	}
-	return (start < end) ? (int)write(fd, start, end - start) : 0;
+	return (start < end) ? vty_async_write(vty, start, end - start) : 0;
 }
 
 static void
@@ -93,11 +102,10 @@ bpf_trace_pipe_read(struct thread *t)
 	ssize_t n;
 
 	ctx->t_trace = NULL;
-	while ((n = read(ctx->trace_fd, buf, sizeof(buf))) > 0) {
-		if (bpf_trace_vty_write(ctx->vty->fd, buf, n) < 0) {
-			ctx->stream.stop(ctx->vty);
-			return;
-		}
+	n = read(ctx->trace_fd, buf, sizeof(buf));
+	if (n > 0 && bpf_trace_vty_write(ctx->vty, buf, n) < 0) {
+		ctx->stream.stop(ctx->vty);
+		return;
 	}
 	ctx->t_trace = thread_add_read(master, bpf_trace_pipe_read, ctx,
 				       ctx->trace_fd, TIMER_NEVER, 0);

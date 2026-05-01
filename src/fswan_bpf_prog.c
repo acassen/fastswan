@@ -32,7 +32,6 @@
 #include "memory.h"
 #include "logger.h"
 #include "bitops.h"
-#include "utils.h"
 #include "list_head.h"
 #include "fswan_data.h"
 #include "fswan_if.h"

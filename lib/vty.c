@@ -447,6 +447,17 @@ vty_write(struct vty *vty, const char *buf, size_t nbytes)
 		buffer_flush_available(vty->obuf, vty->fd);
 }
 
+int
+vty_async_write(struct vty *vty, const void *buf, size_t nbytes)
+{
+	if (vty->status == VTY_CLOSE || vty->fd < 0)
+		return -1;
+
+	buffer_put(vty->obuf, buf, nbytes);
+	vty_event(vty->master, VTY_WRITE, vty->fd, vty);
+	return 0;
+}
+
 /* Ensure length of input buffer.  Is buffer is short, double it. */
 static void
 vty_ensure(struct vty *vty, int length)
@@ -1235,9 +1246,12 @@ vty_read(struct thread *t)
 					       , __func__, vty->fd, strerror(errno));
 		}
 		buffer_reset(vty->obuf);
-		vty->status = VTY_CLOSE;
-		if (vty->priv)
+		if (vty->status == VTY_STREAM && vty->priv) {
+			vty->status = VTY_CLOSE;
 			((struct vty_stream *)vty->priv)->stop(vty);
+		} else {
+			vty->status = VTY_CLOSE;
+		}
 	}
 
 	/* In streaming mode scan for Ctrl-C only, discard all other input. */
@@ -1474,8 +1488,12 @@ vty_flush(struct thread *t)
 			vty_event(t->master, VTY_READ, vty_sock, vty);
 		break;
 	case BUFFER_PENDING:
-		/* There is more data waiting to be written. */
-		vty->status = VTY_MORE;
+		/* There is more data waiting to be written. VTY_STREAM has its
+		 * own input semantics (Ctrl-C handling) so it must not
+		 * be downgraded to the pager state.
+		 */
+		if (vty->status != VTY_STREAM)
+			vty->status = VTY_MORE;
 		if (vty->lines == 0) {
 			vty_event(t->master, VTY_WRITE, vty_sock, vty);
 			break;
@@ -1749,13 +1767,21 @@ vty_listen_unix(struct thread_master *m, const char *path,
 void
 vty_close(struct vty *vty)
 {
+	char addr[INET6_ADDRSTRLEN];
 	int i;
+
+	if (vty->type == VTY_TERM && vty->address.ss_family)
+		log_message(LOG_INFO, "Vty disconnect (vty:%s)",
+			    vty_identity(vty, addr, sizeof(addr)));
 
 	/* Cancel threads.*/
 	if (vty->t_read)
 		thread_del(vty->t_read);
 	if (vty->t_write)
 		thread_del(vty->t_write);
+	/* Drop any orphan event the dispatcher left on this fd. */
+	if (vty->fd > 0)
+		thread_event_purge_fd(vty->master, vty->fd);
 
 	/* Flush buffer. */
 	buffer_flush_all(vty->obuf, vty->fd);

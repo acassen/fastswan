@@ -235,11 +235,8 @@ thread_event_set(const struct thread *t)
 }
 
 static int
-thread_event_cancel(const struct thread *t)
+thread_event_cancel(struct thread_master *m, struct thread_event *event)
 {
-	struct thread_event *event = t->event;
-	struct thread_master *m = t->master;
-
 	if (!event) {
 		log_message(LOG_INFO, "scheduler: Error performing epoll_ctl DEL op no event linked?!");
 		return -1;
@@ -274,7 +271,7 @@ thread_event_del(const struct thread *t, unsigned flag)
 
 	__clear_bit(want_bit, &event->flags);
 	if (!__test_bit(peer_epoll_bit, &event->flags))
-		return thread_event_cancel(t);
+		return thread_event_cancel(t->master, event);
 
 	*slot = NULL;
 	if (thread_event_set(t) < 0)
@@ -599,10 +596,30 @@ thread_close_fd(struct thread *t)
 		return;
 
 	if (t->event)
-		thread_event_cancel(t);
+		thread_event_cancel(t->master, t->event);
 
 	close(t->u.f.fd);
 	t->u.f.fd = -1;
+}
+
+/* Drop any thread/event still bound to fd. The dispatcher's one-shot
+ * pattern (clear slot, keep epoll bit) can leave an orphan event in the
+ * io_events tree if no thread_del runs before close(fd). The orphan then
+ * trips ENOENT on the next epoll_ctl(MOD) when the fd number is reused.
+ */
+void
+thread_event_purge_fd(struct thread_master *m, int fd)
+{
+	struct thread_event *event;
+
+	while ((event = thread_event_get(m, fd))) {
+		if (event->read)
+			thread_del(event->read);
+		else if (event->write)
+			thread_del(event->write);
+		else
+			thread_event_cancel(m, event);
+	}
 }
 
 /* Add timer event thread. */
