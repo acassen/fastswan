@@ -84,4 +84,16 @@ struct xfrm_offload_stats {
 } __attribute__ ((__aligned__(8)));
 
 
+/* Hairpin-to-nexthop reformat record. One cache line per entry */
+#define HAIRPIN_REFORMAT_MAX	18	/* ETH_HLEN(14) + VLAN_HLEN(4) */
+#define HAIRPIN_CACHELINE	64
+#define HAIRPIN_MAP_MAX_ENTRIES	1024
+
+struct hairpin_nexthop {
+	__u8	hdr_len;
+	__u8	reformat[HAIRPIN_REFORMAT_MAX];
+	__u8	_pad[HAIRPIN_CACHELINE - 1 - HAIRPIN_REFORMAT_MAX];
+} __attribute__ ((aligned(HAIRPIN_CACHELINE)));
+
+
 #endif

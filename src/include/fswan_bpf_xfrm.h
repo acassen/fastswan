@@ -33,6 +33,7 @@ enum {
 	FSWAN_BPF_MAP_IPV4_LPM = 0,
 	FSWAN_BPF_MAP_POLICY_STATS_HASH,
 	FSWAN_BPF_MAP_STATS_HASH,
+	FSWAN_BPF_MAP_HAIRPIN,
 	FSWAN_BPF_MAP_CNT
 };
 
@@ -77,6 +78,17 @@ struct xfrm_offload_stats {
 	__u64	tx_pkts;
 	__u64	tx_bytes;
 } __attribute__ ((__aligned__(8)));
+
+/* Hairpin-to-nexthop reformat record (mirror of struct in src/bpf/xfrm.h) */
+#define HAIRPIN_REFORMAT_MAX	18
+#define HAIRPIN_CACHELINE	64
+#define HAIRPIN_MAP_MAX_ENTRIES	1024
+
+struct hairpin_nexthop {
+	__u8	hdr_len;
+	__u8	reformat[HAIRPIN_REFORMAT_MAX];
+	__u8	_pad[HAIRPIN_CACHELINE - 1 - HAIRPIN_REFORMAT_MAX];
+} __attribute__ ((aligned(HAIRPIN_CACHELINE)));
 
 
 /* Prototypes */

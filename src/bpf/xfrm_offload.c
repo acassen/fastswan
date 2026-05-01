@@ -66,6 +66,13 @@ struct {
 	__type(value, struct xfrm_offload_stats);
 } xfrm_offload_stats_hash SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, HAIRPIN_MAP_MAX_ENTRIES);
+	__type(key, __u32);
+	__type(value, struct hairpin_nexthop);
+} hairpin_map SEC(".maps");
+
 
 /*
  *	IP header related update
@@ -162,6 +169,51 @@ xfrm_fib_lookup(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph, stru
 }
 
 /*
+ *	Hairpin-to-nexthop xmit
+ *
+ * Input is always untagged (post-IPsec-decap).
+ */
+static __always_inline int
+xfrm_hairpin_xmit(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph,
+		  struct ipv4_xfrm_policy *p, int idx)
+{
+	const int vlan_sz = (int) sizeof(struct _vlan_hdr);
+	struct hairpin_nexthop *nh = NULL;
+	__u32 ingress = ctx->ingress_ifindex;
+	void *data, *data_end;
+	bool tagged;
+
+	if (ingress < HAIRPIN_MAP_MAX_ENTRIES)
+		nh = bpf_map_lookup_elem(&hairpin_map, &ingress);
+	if (!nh || !nh->hdr_len)
+		return xfrm_fib_lookup(ctx, ethh, iph, p, idx);
+
+	/* TTL while iph is still bounds-valid */
+	ip_decrease_ttl(iph);
+
+	tagged = (nh->hdr_len == ETH_HLEN + vlan_sz);
+	if (tagged && bpf_xdp_adjust_head(ctx, -vlan_sz))
+		return XDP_DROP;
+
+	data = (void *) (long) ctx->data;
+	data_end = (void *) (long) ctx->data_end;
+
+	/* Verifier requires constant-size memcpy per branch */
+	if (tagged) {
+		if (data + ETH_HLEN + vlan_sz > data_end)
+			return XDP_DROP;
+		__builtin_memcpy(data, nh->reformat, ETH_HLEN + vlan_sz);
+	} else {
+		if (data + ETH_HLEN > data_end)
+			return XDP_DROP;
+		__builtin_memcpy(data, nh->reformat, ETH_HLEN);
+	}
+
+	xfrm_stats_update(ctx, ingress, p, idx);
+	return XDP_TX;
+}
+
+/*
  *	XFRM Policy check
  */
 static __always_inline int
@@ -228,7 +280,7 @@ xdp_xfrm_offload(struct parse_pkt *pkt)
 		return bpf_redirect(p->ifindex, 0);
 	}
 
-	return xfrm_fib_lookup(pkt->ctx, ethh, iph, p, idx);
+	return xfrm_hairpin_xmit(pkt->ctx, ethh, iph, p, idx);
 }
 
 /*

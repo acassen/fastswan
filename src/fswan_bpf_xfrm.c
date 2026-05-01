@@ -65,6 +65,7 @@ fswan_bpf_xfrm_map_load(struct fswan_bpf_prog *p)
 	err = fswan_bpf_map_load(p, "ipv4_xfrm_policy_lpm", FSWAN_BPF_MAP_IPV4_LPM);
 	err = err ? : fswan_bpf_map_load(p, "xfrm_policy_stats_hash", FSWAN_BPF_MAP_POLICY_STATS_HASH);
 	err = err ? : fswan_bpf_map_load(p, "xfrm_offload_stats_hash", FSWAN_BPF_MAP_STATS_HASH);
+	err = err ? : fswan_bpf_map_load(p, "hairpin_map", FSWAN_BPF_MAP_HAIRPIN);
 
 	return err;
 }
