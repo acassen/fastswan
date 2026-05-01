@@ -263,7 +263,7 @@ fswan_bpf_prog_attach(struct fswan_bpf_prog *p, struct interface *iface)
 		return -1;
 	}
 
-	if (fswan_bpf_xfrm_stats_init_iface(p, iface)) {
+	if (fswan_bpf_xfrm_stats_iface_register(p, iface)) {
 		bpf_link__destroy(iface->bpf_xdp_lnk);
 		iface->bpf_xdp_lnk = NULL;
 		return -1;
@@ -283,6 +283,7 @@ fswan_bpf_prog_detach(struct fswan_bpf_prog *p, struct interface *iface)
 
 	bpf_link__destroy(iface->bpf_xdp_lnk);
 	iface->bpf_xdp_lnk = NULL;
+	fswan_bpf_xfrm_stats_iface_unregister(p, iface);
 	__clear_bit(FSWAN_INTERFACE_FL_RUNNING_BIT, &iface->flags);
 
 	log_message(LOG_INFO, "bpf-program '%s': detached from %s"

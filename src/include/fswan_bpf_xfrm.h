@@ -84,5 +84,6 @@ int fswan_xfrm_policy_vty(struct vty *vty);
 int fswan_xfrm_policy_stats_vty(struct vty *vty);
 int fswan_xfrm_stats_vty(struct vty *vty);
 int fswan_bpf_xfrm_map_load(struct fswan_bpf_prog *p);
-int fswan_bpf_xfrm_stats_init_iface(struct fswan_bpf_prog *p, struct interface *iface);
+int fswan_bpf_xfrm_stats_iface_register(struct fswan_bpf_prog *p, struct interface *iface);
+int fswan_bpf_xfrm_stats_iface_unregister(struct fswan_bpf_prog *p, struct interface *iface);
 int fswan_bpf_xfrm_action(int, struct xfrm_policy *);

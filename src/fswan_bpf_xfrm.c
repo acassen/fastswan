@@ -717,12 +717,8 @@ fswan_bpf_xfrm_stats_insert(struct fswan_bpf_prog *opts, struct xfrm_offload_sta
 	return 0;
 }
 
-/*
- *	Seed one xfrm_offload_stats slot for the (program, interface) pair.
- *	Called from fswan_bpf_prog_attach() right after the XDP link is up.
- */
 int
-fswan_bpf_xfrm_stats_init_iface(struct fswan_bpf_prog *p, struct interface *iface)
+fswan_bpf_xfrm_stats_iface_register(struct fswan_bpf_prog *p, struct interface *iface)
 {
 	struct xfrm_offload_stats *new;
 	size_t sz;
@@ -736,4 +732,25 @@ fswan_bpf_xfrm_stats_init_iface(struct fswan_bpf_prog *p, struct interface *ifac
 	err = fswan_bpf_xfrm_stats_insert(p, new, sz);
 	free(new);
 	return err;
+}
+
+int
+fswan_bpf_xfrm_stats_iface_unregister(struct fswan_bpf_prog *p, struct interface *iface)
+{
+	struct bpf_map *map = p->bpf_maps[FSWAN_BPF_MAP_STATS_HASH].map;
+	uint32_t key = iface->ifindex;
+	char errmsg[FSWAN_XDP_STRERR_BUFSIZE];
+	int err;
+
+	err = bpf_map__delete_elem(map, &key, sizeof(uint32_t), 0);
+	if (err) {
+		libbpf_strerror(err, errmsg, FSWAN_XDP_STRERR_BUFSIZE);
+		log_message(LOG_INFO, "%s(): Cant del xfrm_stats for ifindex:%d (%s)"
+				    , __FUNCTION__
+				    , key
+				    , errmsg);
+		return -1;
+	}
+
+	return 0;
 }
