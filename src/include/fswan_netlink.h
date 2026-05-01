@@ -84,5 +84,6 @@ struct xfrm_policy {
 int netlink_xfrm_lookup(void);
 int fswan_netlink_if_lookup(int ifindex);
 int fswan_netlink_neigh_lookup(uint32_t addr);
+int fswan_netlink_route_lookup(uint32_t addr, uint32_t *gw, int *oif);
 int fswan_netlink_init(void);
 int fswan_netlink_destroy(void);

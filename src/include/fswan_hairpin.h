@@ -29,8 +29,9 @@
 
 /* hairpin-to-nexthop per-interface state */
 struct fswan_hairpin {
-	uint32_t	nh_addr;		/* IPv4 nexthop, network order */
-	uint8_t		hw_addr[ETH_ALEN];	/* resolved next-hop MAC */
+	uint32_t	nh_addr;		/* user-configured nexthop, net order */
+	uint32_t	via_addr;		/* address actually ARP-resolved */
+	uint8_t		hw_addr[ETH_ALEN];	/* resolved L2 of via_addr */
 	uint16_t	vlan_id;		/* egress VLAN id, 0 = untagged */
 	bool		resolved;
 };
@@ -41,3 +42,4 @@ void fswan_hairpin_clear(struct interface *iface);
 int fswan_hairpin_seed(struct interface *iface);
 void fswan_hairpin_neigh_update(uint32_t addr, const uint8_t *lladdr, int ifindex);
 void fswan_hairpin_neigh_delete(uint32_t addr);
+void fswan_hairpin_route_event(void);

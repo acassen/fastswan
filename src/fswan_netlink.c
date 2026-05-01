@@ -132,8 +132,8 @@ parse_rtattr(struct rtattr **tb, int max, struct rtattr *rta, size_t len)
 
 /* Parse Netlink message */
 static int
-netlink_parse_info(int (*filter) (struct sockaddr_nl *, struct nlmsghdr *),
-		   struct nl_handle *nl, struct nlmsghdr *n, bool read_all)
+netlink_parse_info(int (*filter)(struct sockaddr_nl *, struct nlmsghdr *, void *),
+		   struct nl_handle *nl, void *userdata, bool read_all)
 {
 	ssize_t len;
 	int ret = 0;
@@ -248,15 +248,7 @@ netlink_parse_info(int (*filter) (struct sockaddr_nl *, struct nlmsghdr *),
 				return -1;
 			}
 
-			/* Only take care of XFRM Policy msg */
-			if (h->nlmsg_type != XFRM_MSG_NEWPOLICY &&
-			    h->nlmsg_type != XFRM_MSG_DELPOLICY &&
-			    h->nlmsg_type !=  XFRM_MSG_UPDPOLICY&&
-			    h->nlmsg_type != XFRM_MSG_POLEXPIRE &&
-			    nl != &nl_cmd && h->nlmsg_pid == nl_cmd.nl_pid)
-				continue;
-
-			error = (*filter) (&snl, h);
+			error = (*filter) (&snl, h, userdata);
 			if (error < 0) {
 				log_message(LOG_INFO, "Netlink: filter function error");
 				ret = error;
@@ -475,7 +467,9 @@ xfrm_policy_filter(struct nlmsghdr *n)
 }
 
 static int
-netlink_xfrm_filter(__attribute__((unused)) struct sockaddr_nl *snl, struct nlmsghdr *h)
+netlink_xfrm_filter(__attribute__((unused)) struct sockaddr_nl *snl,
+		    struct nlmsghdr *h,
+		    __attribute__((unused)) void *userdata)
 {
 	switch (h->nlmsg_type) {
 	case XFRM_MSG_NEWPOLICY:
@@ -637,7 +631,8 @@ netlink_if_link_l2(struct interface *iface, struct rtattr **tb)
 
 static int
 netlink_if_link_filter(__attribute__((unused)) struct sockaddr_nl *snl,
-		       struct nlmsghdr *h)
+		       struct nlmsghdr *h,
+		       __attribute__((unused)) void *userdata)
 {
 	struct ifinfomsg *ifi = NLMSG_DATA(h);
 	struct rtattr *tb[IFLA_MAX + 1];
@@ -682,7 +677,8 @@ fswan_netlink_if_lookup(int ifindex)
  */
 static int
 netlink_neigh_filter(__attribute__((unused)) struct sockaddr_nl *snl,
-		     struct nlmsghdr *h)
+		     struct nlmsghdr *h,
+		     __attribute__((unused)) void *userdata)
 {
 	struct ndmsg *r = NLMSG_DATA(h);
 	struct rtattr *tb[NDA_MAX + 1];
@@ -714,18 +710,6 @@ netlink_neigh_filter(__attribute__((unused)) struct sockaddr_nl *snl,
 	fswan_hairpin_neigh_update(addr, RTA_DATA(tb[NDA_LLADDR]),
 				   r->ndm_ifindex);
 	return 0;
-}
-
-static void
-kernel_netlink_route(struct thread *thread)
-{
-	struct nl_handle *nl = THREAD_ARG(thread);
-
-	if (thread->type != THREAD_READ_TIMEOUT)
-		netlink_parse_info(netlink_neigh_filter, nl, NULL, true);
-
-	nl->thread = thread_add_read(master, kernel_netlink_route, nl, nl->fd,
-				     TIMER_NEVER, 0);
 }
 
 static int
@@ -765,6 +749,144 @@ fswan_netlink_neigh_lookup(uint32_t addr)
 
 
 /*
+ *	Netlink route lookup (synchronous)
+ */
+struct netlink_route_result {
+	uint32_t	gw;
+	int		oif;
+};
+
+static void
+parse_rta_gateway(struct rtattr *rta, uint32_t *gw)
+{
+	if (rta && RTA_PAYLOAD(rta) == sizeof(uint32_t))
+		*gw = *(uint32_t *) RTA_DATA(rta);
+}
+
+static void
+parse_rta_multipath(struct rtattr *rta, struct netlink_route_result *res)
+{
+	struct rtnexthop *rtnh = RTA_DATA(rta);
+	struct rtattr *sub_tb[RTA_MAX + 1];
+	int sublen, len = RTA_PAYLOAD(rta);
+
+	if (!RTNH_OK(rtnh, len))
+		return;
+
+	res->oif = rtnh->rtnh_ifindex;
+	sublen = rtnh->rtnh_len - sizeof(*rtnh);
+	if (sublen <= 0)
+		return;
+
+	parse_rtattr(sub_tb, RTA_MAX, RTNH_DATA(rtnh), sublen);
+	parse_rta_gateway(sub_tb[RTA_GATEWAY], &res->gw);
+}
+
+static int
+netlink_route_filter(__attribute__((unused)) struct sockaddr_nl *snl,
+		     struct nlmsghdr *h, void *userdata)
+{
+	struct netlink_route_result *res = userdata;
+	struct rtmsg *r = NLMSG_DATA(h);
+	struct rtattr *tb[RTA_MAX + 1];
+	size_t len;
+
+	if (h->nlmsg_type != RTM_NEWROUTE)
+		return 0;
+	if (h->nlmsg_len < NLMSG_LENGTH(sizeof *r))
+		return -1;
+	if (r->rtm_family != AF_INET)
+		return 0;
+
+	len = h->nlmsg_len - NLMSG_LENGTH(sizeof *r);
+	parse_rtattr(tb, RTA_MAX, RTM_RTA(r), len);
+
+	if (tb[RTA_MULTIPATH]) {
+		parse_rta_multipath(tb[RTA_MULTIPATH], res);
+		return 0;
+	}
+
+	if (tb[RTA_OIF] && RTA_PAYLOAD(tb[RTA_OIF]) == sizeof(int))
+		res->oif = *(int *) RTA_DATA(tb[RTA_OIF]);
+	parse_rta_gateway(tb[RTA_GATEWAY], &res->gw);
+	return 0;
+}
+
+static int
+netlink_route_request(struct nl_handle *nl, uint32_t addr)
+{
+	struct sockaddr_nl snl = { .nl_family = AF_NETLINK };
+	struct {
+		struct nlmsghdr	nlh;
+		struct rtmsg	rtm;
+		char		buf[64];
+	} req = {
+		.nlh.nlmsg_len = NLMSG_LENGTH(sizeof req.rtm),
+		.nlh.nlmsg_flags = NLM_F_REQUEST,
+		.nlh.nlmsg_type = RTM_GETROUTE,
+		.nlh.nlmsg_seq = ++nl->seq,
+		.rtm.rtm_family = AF_INET,
+		.rtm.rtm_dst_len = 32,
+	};
+
+	addattr_l(&req.nlh, sizeof req, RTA_DST, &addr, sizeof addr);
+
+	if (sendto(nl->fd, &req, req.nlh.nlmsg_len, 0,
+		   (struct sockaddr *) &snl, sizeof snl) < 0) {
+		log_message(LOG_INFO, "Netlink: sendto() failed: %m");
+		return -1;
+	}
+	return 0;
+}
+
+int
+fswan_netlink_route_lookup(uint32_t addr, uint32_t *gw, int *oif)
+{
+	struct netlink_route_result res = {};
+
+	if (netlink_route_request(&nl_cmd, addr) < 0 ||
+	    netlink_parse_info(netlink_route_filter, &nl_cmd, &res, false) < 0)
+		return -1;
+
+	*gw = res.gw;
+	*oif = res.oif;
+	return 0;
+}
+
+
+/*
+ *	Route event dispatch (RTNLGRP_NEIGH + RTNLGRP_IPV4_ROUTE broadcast)
+ */
+static int
+netlink_route_event_filter(struct sockaddr_nl *snl, struct nlmsghdr *h,
+			   void *userdata)
+{
+	switch (h->nlmsg_type) {
+	case RTM_NEWNEIGH:
+	case RTM_DELNEIGH:
+		return netlink_neigh_filter(snl, h, userdata);
+	case RTM_NEWROUTE:
+	case RTM_DELROUTE:
+		fswan_hairpin_route_event();
+		return 0;
+	}
+	return 0;
+}
+
+static void
+kernel_netlink_route(struct thread *thread)
+{
+	struct nl_handle *nl = THREAD_ARG(thread);
+
+	if (thread->type != THREAD_READ_TIMEOUT)
+		netlink_parse_info(netlink_route_event_filter, nl, NULL, true);
+
+	nl->thread = thread_add_read(master, kernel_netlink_route, nl, nl->fd,
+				     TIMER_NEVER, 0);
+}
+
+
+/*
  *	Kernel Netlink channel init
  */
 int
@@ -789,9 +911,10 @@ fswan_netlink_init(void)
 		return -1;
 	}
 
-	/* RTNLGRP_NEIGH reflector for hairpin-to-nexthop neighbour tracking. */
+	/* RTNLGRP_NEIGH + RTNLGRP_IPV4_ROUTE reflector for hairpin tracking. */
 	err = netlink_open(&nl_kernel_route, daemon_data->nl_rcvbuf_size, SOCK_NONBLOCK
-				          , NETLINK_ROUTE, RTNLGRP_NEIGH, 0);
+				          , NETLINK_ROUTE, RTNLGRP_NEIGH,
+				            RTNLGRP_IPV4_ROUTE, 0);
 	if (err) {
 		log_message(LOG_INFO, "Error while registering Kernel netlink route reflector");
 		netlink_close(&nl_kernel);

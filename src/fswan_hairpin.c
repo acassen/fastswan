@@ -151,21 +151,44 @@ fswan_hairpin_unpublish(struct interface *iface)
 int
 fswan_hairpin_set(struct interface *iface, uint32_t nh_addr)
 {
+	uint32_t gw = 0;
+	int oif = 0;
+
 	if (!iface->hairpin) {
 		PMALLOC(iface->hairpin);
 		if (!iface->hairpin)
 			return -1;
 	}
 
+	/* Reset state and clear any stale BPF map slot first */
 	iface->hairpin->nh_addr = nh_addr;
+	iface->hairpin->via_addr = 0;
 	iface->hairpin->resolved = false;
 	iface->hairpin->vlan_id = 0;
 	memset(iface->hairpin->hw_addr, 0, ETH_ALEN);
+	fswan_hairpin_unpublish(iface);
 
-	/* Synchronous resolution via netlink_neigh_filter which
-	 * calls fswan_hairpin_neigh_update() and update resolved.
+	if (fswan_netlink_route_lookup(nh_addr, &gw, &oif) < 0) {
+		log_message(LOG_INFO, "hairpin: %s: no route to nexthop"
+				      " %u.%u.%u.%u"
+				    , iface->ifname, NIPQUAD(nh_addr));
+		return -1;
+	}
+
+	if (!fswan_hairpin_egress_match(iface, oif)) {
+		log_message(LOG_INFO, "hairpin: %s: route to %u.%u.%u.%u"
+				      " via oif %d is neither this iface nor"
+				      " a VLAN child of it"
+				    , iface->ifname, NIPQUAD(nh_addr), oif);
+		return -1;
+	}
+
+	iface->hairpin->via_addr = gw ? : nh_addr;
+
+	/* Synchronous neigh resolution. Jf not in the kernel cache yet,
+	 * a later RTM_NEWNEIGH event will fill the slot.
 	 */
-	fswan_netlink_neigh_lookup(nh_addr);
+	fswan_netlink_neigh_lookup(iface->hairpin->via_addr);
 
 	return iface->hairpin->resolved ? 0 : -1;
 }
@@ -196,12 +219,12 @@ fswan_hairpin_neigh_update(uint32_t addr, const uint8_t *lladdr, int ifindex)
 	struct interface *iface, *egress;
 
 	list_for_each_entry(iface, &daemon_data->interfaces, next) {
-		if (!iface->hairpin || iface->hairpin->nh_addr != addr)
+		if (!iface->hairpin || iface->hairpin->via_addr != addr)
 			continue;
 
 		egress = fswan_hairpin_egress_match(iface, ifindex);
 		if (!egress) {
-			log_message(LOG_INFO, "hairpin: %s: nexthop %u.%u.%u.%u"
+			log_message(LOG_INFO, "hairpin: %s: via %u.%u.%u.%u"
 					      " resolved on ifindex %d which is"
 					      " neither this iface nor a VLAN"
 					      " child of it! ignoring..."
@@ -224,9 +247,21 @@ fswan_hairpin_neigh_delete(uint32_t addr)
 	struct interface *iface;
 
 	list_for_each_entry(iface, &daemon_data->interfaces, next) {
-		if (!iface->hairpin || iface->hairpin->nh_addr != addr)
+		if (!iface->hairpin || iface->hairpin->via_addr != addr)
 			continue;
 		iface->hairpin->resolved = false;
 		fswan_hairpin_unpublish(iface);
+	}
+}
+
+void
+fswan_hairpin_route_event(void)
+{
+	struct interface *iface;
+
+	list_for_each_entry(iface, &daemon_data->interfaces, next) {
+		if (!iface->hairpin)
+			continue;
+		fswan_hairpin_set(iface, iface->hairpin->nh_addr);
 	}
 }
