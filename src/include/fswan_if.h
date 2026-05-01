@@ -26,12 +26,15 @@
 #include <stdint.h>
 #include <net/if.h>
 
+#include <linux/if_ether.h>
+
 #include "list_head.h"
 #include "ethtool.h"
 
 /* Forward declarations */
 struct bpf_link;
 struct fswan_bpf_prog;
+struct fswan_hairpin;
 
 /* Per-interface flags */
 enum fswan_interface_flags {
@@ -46,6 +49,10 @@ struct interface {
 	int			ifindex;
 	char			description[128];
 
+	/* L2 attributes from RTM_NEWLINK */
+	uint8_t			hw_addr[ETH_ALEN];
+	uint16_t		vlan_id;	/* IFLA_VLAN_ID, 0 if not a VLAN subif */
+
 	/* point to real device if it's a virtual device */
 	struct interface	*link_iface;
 
@@ -53,6 +60,9 @@ struct interface {
 	struct fswan_bpf_prog	*bpf_prog;
 	struct list_head	bpf_prog_list;	/* in bpf_prog->iface_bind_list */
 	struct bpf_link		*bpf_xdp_lnk;
+
+	/* hairpin-to-nexthop config (NULL if not configured) */
+	struct fswan_hairpin	*hairpin;
 
 	/* xfrm-offload aggregate counters (BPF map readback) */
 	uint64_t		rx_pkts;

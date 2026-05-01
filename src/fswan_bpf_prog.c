@@ -38,6 +38,7 @@
 #include "fswan_bpf.h"
 #include "fswan_bpf_prog.h"
 #include "fswan_bpf_xfrm.h"
+#include "fswan_hairpin.h"
 
 
 /* Local data */
@@ -268,6 +269,8 @@ fswan_bpf_prog_attach(struct fswan_bpf_prog *p, struct interface *iface)
 		iface->bpf_xdp_lnk = NULL;
 		return -1;
 	}
+
+	fswan_hairpin_seed(iface);
 
 	__set_bit(FSWAN_INTERFACE_FL_RUNNING_BIT, &iface->flags);
 	log_message(LOG_INFO, "bpf-program '%s': attached to %s (ifindex:%d)"

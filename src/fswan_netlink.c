@@ -23,10 +23,12 @@
 
 /* system includes */
 #include <stdarg.h>
+#include <string.h>
 #include <unistd.h>
 #include <time.h>
 #include <arpa/inet.h>
 #include <net/if.h>
+#include <linux/if_ether.h>
 #include <linux/if_link.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
@@ -44,9 +46,11 @@
 #include "fswan_if.h"
 #include "fswan_netlink.h"
 #include "fswan_bpf_xfrm.h"
+#include "fswan_hairpin.h"
 
 /* Local data */
-static struct nl_handle nl_kernel = { .fd = -1 };	/* Kernel reflection channel */
+static struct nl_handle nl_kernel = { .fd = -1 };	/* XFRM reflection channel */
+static struct nl_handle nl_kernel_route = { .fd = -1 };	/* RTNLGRP_NEIGH reflection */
 static struct nl_handle nl_cmd = { .fd = -1 };		/* Kernel command channel */
 
 /* Extern data */
@@ -57,6 +61,12 @@ extern struct thread_master *master;
  * otherwise need to maintain a uapi copy like iproute2 does */
 #ifndef XFRM_OFFLOAD_PACKET
 #define XFRM_OFFLOAD_PACKET	4
+#endif
+
+/* NDA_RTA is not exported by all distros' linux/neighbour.h. */
+#ifndef NDA_RTA
+#define NDA_RTA(r) \
+	((struct rtattr *)(((char *)(r)) + NLMSG_ALIGN(sizeof(struct ndmsg))))
 #endif
 
 static const char *
@@ -572,14 +582,66 @@ netlink_if_request(struct nl_handle *nl, unsigned char family, uint16_t type, in
 	return 0;
 }
 
+static uint16_t
+netlink_if_parse_vlan_id(struct rtattr *linkinfo)
+{
+	struct rtattr *li[IFLA_INFO_MAX + 1];
+	struct rtattr *vd[IFLA_VLAN_MAX + 1];
+	const char *kind;
+
+	parse_rtattr(li, IFLA_INFO_MAX, RTA_DATA(linkinfo), RTA_PAYLOAD(linkinfo));
+	if (!li[IFLA_INFO_KIND] || !li[IFLA_INFO_DATA])
+		return 0;
+
+	kind = RTA_DATA(li[IFLA_INFO_KIND]);
+	if (strcmp(kind, "vlan"))
+		return 0;
+
+	parse_rtattr(vd, IFLA_VLAN_MAX,
+		     RTA_DATA(li[IFLA_INFO_DATA]),
+		     RTA_PAYLOAD(li[IFLA_INFO_DATA]));
+	if (!vd[IFLA_VLAN_ID] || RTA_PAYLOAD(vd[IFLA_VLAN_ID]) != sizeof(uint16_t))
+		return 0;
+
+	return *(uint16_t *) RTA_DATA(vd[IFLA_VLAN_ID]);
+}
+
+static void
+netlink_if_link_master(struct interface *iface, struct rtattr **tb)
+{
+	struct interface *master;
+	int link_ifindex;
+
+	if (!tb[IFLA_LINK] || tb[IFLA_LINK_NETNSID] ||
+	    RTA_PAYLOAD(tb[IFLA_LINK]) != sizeof(uint32_t))
+		return;
+
+	link_ifindex = *(uint32_t *) RTA_DATA(tb[IFLA_LINK]);
+	if (!link_ifindex || link_ifindex == iface->ifindex)
+		return;
+
+	master = fswan_if_get_by_ifindex(link_ifindex, true);
+	if (master)
+		fswan_if_link(master, iface);
+}
+
+static void
+netlink_if_link_l2(struct interface *iface, struct rtattr **tb)
+{
+	if (tb[IFLA_ADDRESS] && RTA_PAYLOAD(tb[IFLA_ADDRESS]) == ETH_ALEN)
+		memcpy(iface->hw_addr, RTA_DATA(tb[IFLA_ADDRESS]), ETH_ALEN);
+
+	if (tb[IFLA_LINKINFO])
+		iface->vlan_id = netlink_if_parse_vlan_id(tb[IFLA_LINKINFO]);
+}
+
 static int
 netlink_if_link_filter(__attribute__((unused)) struct sockaddr_nl *snl,
 		       struct nlmsghdr *h)
 {
 	struct ifinfomsg *ifi = NLMSG_DATA(h);
 	struct rtattr *tb[IFLA_MAX + 1];
-	struct interface *iface, *master;
-	int link_ifindex;
+	struct interface *iface;
 	size_t len;
 
 	if (h->nlmsg_type != RTM_NEWLINK)
@@ -594,23 +656,14 @@ netlink_if_link_filter(__attribute__((unused)) struct sockaddr_nl *snl,
 
 	iface = fswan_if_get_by_ifindex(ifi->ifi_index, false);
 	if (!iface) {
-		iface = fswan_if_alloc((char *)RTA_DATA(tb[IFLA_IFNAME]),
+		iface = fswan_if_alloc((char *) RTA_DATA(tb[IFLA_IFNAME]),
 				       ifi->ifi_index);
 		if (!iface)
 			return -1;
 	}
 
-	/* IFLA_LINK: master ifindex, in the same netns */
-	if (tb[IFLA_LINK] && !tb[IFLA_LINK_NETNSID] &&
-	    RTA_PAYLOAD(tb[IFLA_LINK]) == sizeof(uint32_t)) {
-		link_ifindex = *(uint32_t *)RTA_DATA(tb[IFLA_LINK]);
-		if (link_ifindex && link_ifindex != ifi->ifi_index) {
-			master = fswan_if_get_by_ifindex(link_ifindex, true);
-			if (master)
-				fswan_if_link(master, iface);
-		}
-	}
-
+	netlink_if_link_l2(iface, tb);
+	netlink_if_link_master(iface, tb);
 	return 0;
 }
 
@@ -619,6 +672,93 @@ fswan_netlink_if_lookup(int ifindex)
 {
 	if (netlink_if_request(&nl_cmd, AF_PACKET, RTM_GETLINK, ifindex) < 0 ||
 	    netlink_parse_info(netlink_if_link_filter, &nl_cmd, NULL, false) < 0)
+		return -1;
+	return 0;
+}
+
+
+/*
+ *	Netlink neighbour reflector
+ */
+static int
+netlink_neigh_filter(__attribute__((unused)) struct sockaddr_nl *snl,
+		     struct nlmsghdr *h)
+{
+	struct ndmsg *r = NLMSG_DATA(h);
+	struct rtattr *tb[NDA_MAX + 1];
+	uint32_t addr;
+	size_t len;
+
+	if (h->nlmsg_type != RTM_NEWNEIGH && h->nlmsg_type != RTM_DELNEIGH)
+		return 0;
+	if (h->nlmsg_len < NLMSG_LENGTH(sizeof *r))
+		return -1;
+	if (r->ndm_family != AF_INET)
+		return 0;
+
+	len = h->nlmsg_len - NLMSG_LENGTH(sizeof *r);
+	parse_rtattr(tb, NDA_MAX, NDA_RTA(r), len);
+	if (!tb[NDA_DST] || RTA_PAYLOAD(tb[NDA_DST]) != sizeof(uint32_t))
+		return 0;
+
+	addr = *(uint32_t *) RTA_DATA(tb[NDA_DST]);
+
+	if (h->nlmsg_type == RTM_DELNEIGH) {
+		fswan_hairpin_neigh_delete(addr);
+		return 0;
+	}
+
+	if (!tb[NDA_LLADDR] || RTA_PAYLOAD(tb[NDA_LLADDR]) != ETH_ALEN)
+		return 0;
+
+	fswan_hairpin_neigh_update(addr, RTA_DATA(tb[NDA_LLADDR]),
+				   r->ndm_ifindex);
+	return 0;
+}
+
+static void
+kernel_netlink_route(struct thread *thread)
+{
+	struct nl_handle *nl = THREAD_ARG(thread);
+
+	if (thread->type != THREAD_READ_TIMEOUT)
+		netlink_parse_info(netlink_neigh_filter, nl, NULL, true);
+
+	nl->thread = thread_add_read(master, kernel_netlink_route, nl, nl->fd,
+				     TIMER_NEVER, 0);
+}
+
+static int
+netlink_neigh_request(struct nl_handle *nl, uint32_t addr)
+{
+	struct sockaddr_nl snl = { .nl_family = AF_NETLINK };
+	struct {
+		struct nlmsghdr	nlh;
+		struct ndmsg	ndm;
+		char		buf[64];
+	} req = {
+		.nlh.nlmsg_len = NLMSG_LENGTH(sizeof req.ndm),
+		.nlh.nlmsg_flags = NLM_F_REQUEST,
+		.nlh.nlmsg_type = RTM_GETNEIGH,
+		.nlh.nlmsg_seq = ++nl->seq,
+		.ndm.ndm_family = AF_INET,
+	};
+
+	addattr_l(&req.nlh, sizeof req, NDA_DST, &addr, sizeof addr);
+
+	if (sendto(nl->fd, &req, req.nlh.nlmsg_len, 0,
+		   (struct sockaddr *) &snl, sizeof snl) < 0) {
+		log_message(LOG_INFO, "Netlink: sendto() failed: %m");
+		return -1;
+	}
+	return 0;
+}
+
+int
+fswan_netlink_neigh_lookup(uint32_t addr)
+{
+	if (netlink_neigh_request(&nl_cmd, addr) < 0 ||
+	    netlink_parse_info(netlink_neigh_filter, &nl_cmd, NULL, false) < 0)
 		return -1;
 	return 0;
 }
@@ -649,16 +789,31 @@ fswan_netlink_init(void)
 		return -1;
 	}
 
-	log_message(LOG_INFO, "Registering Kernel netlink reflector");
-	nl_kernel.thread = thread_add_read(master, kernel_netlink, &nl_kernel, nl_kernel.fd,
-					   TIMER_NEVER, 0);
+	/* RTNLGRP_NEIGH reflector for hairpin-to-nexthop neighbour tracking. */
+	err = netlink_open(&nl_kernel_route, daemon_data->nl_rcvbuf_size, SOCK_NONBLOCK
+				          , NETLINK_ROUTE, RTNLGRP_NEIGH, 0);
+	if (err) {
+		log_message(LOG_INFO, "Error while registering Kernel netlink route reflector");
+		netlink_close(&nl_kernel);
+		netlink_close(&nl_cmd);
+		return -1;
+	}
+
+	log_message(LOG_INFO, "Registering Kernel netlink reflectors");
+	nl_kernel.thread = thread_add_read(master, kernel_netlink, &nl_kernel,
+					   nl_kernel.fd, TIMER_NEVER, 0);
+	nl_kernel_route.thread = thread_add_read(master, kernel_netlink_route,
+						 &nl_kernel_route,
+						 nl_kernel_route.fd,
+						 TIMER_NEVER, 0);
 	return 0;
 }
 
 int
 fswan_netlink_destroy(void)
 {
-	log_message(LOG_INFO, "Unregistering Kernel netlink reflector");
+	log_message(LOG_INFO, "Unregistering Kernel netlink reflectors");
+	netlink_close(&nl_kernel_route);
 	netlink_close(&nl_kernel);
 	netlink_close(&nl_cmd);
 	return 0;

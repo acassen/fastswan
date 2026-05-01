@@ -37,6 +37,7 @@
 #include "fswan_netlink.h"
 #include "fswan_monitor.h"
 #include "fswan_bpf_prog.h"
+#include "fswan_hairpin.h"
 
 
 /* Extern data */
@@ -126,6 +127,8 @@ fswan_if_destroy(struct interface *iface)
 	__set_bit(FSWAN_INTERFACE_FL_DESTROYING_BIT, &iface->flags);
 	fswan_monitor_iface_quiesce();
 	list_head_del(&iface->next);
+
+	fswan_hairpin_clear(iface);
 
 	if (iface->bpf_prog) {
 		fswan_bpf_prog_detach(iface->bpf_prog, iface);
