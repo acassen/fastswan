@@ -24,7 +24,6 @@
 #define KBUILD_MODNAME "xfrm_offload"
 #include <stddef.h>
 #include <stdbool.h>
-#include <string.h>
 #include <time.h>
 #include <linux/in.h>
 #include <linux/if_ether.h>

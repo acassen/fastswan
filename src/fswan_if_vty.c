@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arpa/inet.h>
 
 /* local includes */
 #include "bitops.h"
@@ -33,10 +34,12 @@
 #include "command.h"
 #include "ethtool.h"
 #include "pci.h"
+#include "inet_utils.h"
 #include "fswan_data.h"
 #include "fswan_if.h"
 #include "fswan_if_rxq.h"
 #include "fswan_bpf_prog.h"
+#include "fswan_hairpin.h"
 
 
 /* Extern data */
@@ -315,6 +318,45 @@ DEFUN(if_no_shutdown,
 	return CMD_SUCCESS;
 }
 
+DEFUN(if_hairpin_to_nexthop,
+      if_hairpin_to_nexthop_cmd,
+      "hairpin-to-nexthop A.B.C.D",
+      "Pre-resolve the next-hop MAC for inbound (post-IPsec-decap) traffic"
+      " on this interface and skip the per-packet bpf_fib_lookup. The"
+      " reformat is rebuilt automatically when the kernel's ARP entry"
+      " changes; until first resolution, the BPF datapath falls back to"
+      " bpf_fib_lookup\n"
+      "IPv4 address of the next-hop gateway\n")
+{
+	struct interface *iface = vty->index;
+	uint32_t addr;
+
+	if (inet_pton(AF_INET, argv[0], &addr) != 1) {
+		vty_out(vty, "%% Invalid IPv4 address '%s'%s"
+			   , argv[0], VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+
+	if (fswan_hairpin_set(iface, addr))
+		vty_out(vty, "%% Cannot resolve nexthop %s on %s (NUD_FAILED)!"
+			     " will retry on neigh update%s"
+			   , argv[0], iface->ifname, VTY_NEWLINE);
+
+	return CMD_SUCCESS;
+}
+
+DEFUN(no_if_hairpin_to_nexthop,
+      no_if_hairpin_to_nexthop_cmd,
+      "no hairpin-to-nexthop",
+      "Drop the hairpin nexthop binding; subsequent inbound packets fall back"
+      " to the regular fib_lookup path\n")
+{
+	struct interface *iface = vty->index;
+
+	fswan_hairpin_clear(iface);
+	return CMD_SUCCESS;
+}
+
 
 /*
  *	Show commands
@@ -445,6 +487,9 @@ interface_config_write(struct vty *vty)
 		if (iface->bpf_prog)
 			vty_out(vty, " bpf-program %s%s"
 				   , iface->bpf_prog->name, VTY_NEWLINE);
+		if (iface->hairpin)
+			vty_out(vty, " hairpin-to-nexthop %u.%u.%u.%u%s"
+				   , NIPQUAD(iface->hairpin->nh_addr), VTY_NEWLINE);
 		vty_out(vty, " %sshutdown%s"
 			   , __test_bit(FSWAN_INTERFACE_FL_SHUTDOWN_BIT, &iface->flags) ? "" : "no "
 			   , VTY_NEWLINE);
@@ -468,6 +513,8 @@ cmd_ext_interface_install(void)
 	install_element(INTERFACE_NODE, &if_description_cmd);
 	install_element(INTERFACE_NODE, &if_bpf_program_cmd);
 	install_element(INTERFACE_NODE, &no_if_bpf_program_cmd);
+	install_element(INTERFACE_NODE, &if_hairpin_to_nexthop_cmd);
+	install_element(INTERFACE_NODE, &no_if_hairpin_to_nexthop_cmd);
 	install_element(INTERFACE_NODE, &if_shutdown_cmd);
 	install_element(INTERFACE_NODE, &if_no_shutdown_cmd);
 
