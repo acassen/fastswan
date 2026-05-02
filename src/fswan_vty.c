@@ -146,26 +146,6 @@ DEFUN(no_disable_xdp_xfrm_offload_stats,
 				   "XDP XFRM Statistics already enabled");
 }
 
-DEFUN(disable_xdp_xfrm_src_match,
-      disable_xdp_xfrm_src_match_cmd,
-      "disable-xdp-xfrm-source-matching",
-      "Disable source-prefix matching in the XDP XFRM lookup;"
-      " only the destination prefix is matched against the LPM table\n")
-{
-	return xdp_xfrm_flag_set(vty, FSWAN_FL_XDP_XFRM_DISABLE_SRC_MATCH_BIT,
-				 "XDP XFRM source matching already disabled");
-}
-
-DEFUN(no_disable_xdp_xfrm_src_match,
-      no_disable_xdp_xfrm_src_match_cmd,
-      "no disable-xdp-xfrm-source-matching",
-      "Re-enable source-prefix matching in the XDP XFRM lookup (default behaviour)\n")
-{
-	return xdp_xfrm_flag_clear(vty, FSWAN_FL_XDP_XFRM_DISABLE_SRC_MATCH_BIT,
-				   "XDP XFRM source matching already enabled");
-}
-
-
 /*
  *	Show commands
  */
@@ -210,9 +190,6 @@ cmd_ext_fswan_install(void)
 	install_element(CONFIG_NODE, &load_existing_xfrm_policy_cmd);
 	install_element(CONFIG_NODE, &disable_xdp_xfrm_stats_offload_cmd);
 	install_element(CONFIG_NODE, &no_disable_xdp_xfrm_stats_offload_cmd);
-	install_element(CONFIG_NODE, &disable_xdp_xfrm_src_match_cmd);
-	install_element(CONFIG_NODE, &no_disable_xdp_xfrm_src_match_cmd);
-
 	/* Install Global show commands */
 	install_element(VIEW_NODE, &show_xdp_xfrm_offload_policy_cmd);
 	install_element(VIEW_NODE, &show_xdp_xfrm_offload_policy_stats_cmd);

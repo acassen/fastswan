@@ -30,8 +30,9 @@
 
 /* MAP Entries*/
 enum {
-	FSWAN_BPF_MAP_IPV4_LPM = 0,
-	FSWAN_BPF_MAP_POLICY_STATS_HASH,
+	FSWAN_BPF_MAP_DST_LPM = 0,
+	FSWAN_BPF_MAP_POLICY_LPM,
+	FSWAN_BPF_MAP_POLICY_STATS_ARRAY,
 	FSWAN_BPF_MAP_STATS_HASH,
 	FSWAN_BPF_MAP_HAIRPIN,
 	FSWAN_BPF_MAP_CNT
@@ -40,35 +41,30 @@ enum {
 #define XFRM_POLICY_FL_INGRESS	(1 << 0)
 #define XFRM_POLICY_FL_EGRESS	(1 << 1)
 #define XFRM_POLICY_FL_NO_STATS	(1 << 2)
-#define XFRM_POLICY_FL_IGN_SRC	(1 << 3)
 
-struct ipv4_lpm_key {
-	__u32	pfx_len;
-	__u32	pfx;
+#define XFRM_POLICY_MAX		262144
+#define XFRM_DST_MAX		65536
+
+struct ipv4_dst_lpm_key {
+	__u32	prefixlen;
+	__be32	dst;
 };
 
-struct ipv4_pfx {
-	__be32	mask;
-	__be32	addr;
+struct ipv4_policy_lpm_key {
+	__u32	prefixlen;
+	__u32	dst_id;
+	__be32	src;
 };
 
-#define XFRM_POLICY_MAX_SRC_PFX	5
 struct ipv4_xfrm_policy {
-	__u32	pfx_len;
-	__u32	pfx;
-	struct ipv4_pfx src_pfx[XFRM_POLICY_MAX_SRC_PFX];
 	__u32	ifindex;
-
+	__u32	stats_slot;
 	__u8	flags;
 } __attribute__ ((__aligned__(8)));
 
-struct xfrm_counters {
+struct xfrm_policy_stats {
 	__u64	pkts;
 	__u64	bytes;
-} __attribute__ ((__aligned__(8)));
-
-struct xfrm_policy_stats {
-	struct xfrm_counters src_pfx[XFRM_POLICY_MAX_SRC_PFX];
 } __attribute__ ((__aligned__(8)));
 
 struct xfrm_offload_stats {

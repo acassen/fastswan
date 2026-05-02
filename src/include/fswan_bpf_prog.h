@@ -30,6 +30,16 @@
 /* Forward declarations */
 struct interface;
 
+/* Allocator capacities. Must match XFRM_POLICY_MAX / XFRM_DST_MAX in
+ * src/include/fswan_bpf_xfrm.h and src/bpf/xfrm.h.
+ */
+#define FSWAN_BPF_BITS_PER_LONG		(8 * sizeof(unsigned long))
+#define FSWAN_BPF_BITMAP_LONGS(n)	(((n) + FSWAN_BPF_BITS_PER_LONG - 1) \
+					 / FSWAN_BPF_BITS_PER_LONG)
+#define FSWAN_BPF_DST_ID_MAX		65536
+#define FSWAN_BPF_STATS_SLOTS_LONGS	FSWAN_BPF_BITMAP_LONGS(262144)
+#define FSWAN_BPF_DST_ID_LONGS		FSWAN_BPF_BITMAP_LONGS(FSWAN_BPF_DST_ID_MAX)
+
 /* BPF MAP wrapper */
 struct fswan_bpf_maps {
 	struct bpf_map		*map;
@@ -58,6 +68,15 @@ struct fswan_bpf_prog {
 	struct list_head	iface_bind_list;	/* attached interfaces */
 	struct list_head	next;			/* in daemon_data->bpf_progs */
 	unsigned long		flags;
+
+	/* Two-stage LPM allocator state. dst_id_bitmap reserves the 32-bit
+	 * tokens stored in dst_lpm; dst_id_refcount tracks how many
+	 * policy_lpm entries reference each token. stats_slot_bitmap reserves
+	 * the indexes into xfrm_policy_stats_array.
+	 */
+	unsigned long		stats_slot_bitmap[FSWAN_BPF_STATS_SLOTS_LONGS];
+	unsigned long		dst_id_bitmap[FSWAN_BPF_DST_ID_LONGS];
+	uint32_t		dst_id_refcount[FSWAN_BPF_DST_ID_MAX];
 };
 
 
