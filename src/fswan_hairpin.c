@@ -91,7 +91,11 @@ fswan_hairpin_egress_match(struct interface *iface, int neigh_ifindex)
 	if (neigh_ifindex == iface->ifindex)
 		return iface;
 
-	neigh_iface = fswan_if_get_by_ifindex(neigh_ifindex, false);
+	/* VTY may load hairpin-to-nexthop before the VLAN child's
+	 * interface block, so trigger an on-demand RTM_GETLINK for
+	 * the oif returned by route lookup.
+	 */
+	neigh_iface = fswan_if_get_by_ifindex(neigh_ifindex, true);
 	if (neigh_iface && neigh_iface->link_iface == iface)
 		return neigh_iface;
 
@@ -185,10 +189,10 @@ fswan_hairpin_set(struct interface *iface, uint32_t nh_addr)
 
 	iface->hairpin->via_addr = gw ? : nh_addr;
 
-	/* Synchronous neigh resolution. Jf not in the kernel cache yet,
+	/* Synchronous neigh resolution. If not in the kernel cache yet,
 	 * a later RTM_NEWNEIGH event will fill the slot.
 	 */
-	fswan_netlink_neigh_lookup(iface->hairpin->via_addr);
+	fswan_netlink_neigh_lookup(iface->hairpin->via_addr, oif);
 
 	return iface->hairpin->resolved ? 0 : -1;
 }

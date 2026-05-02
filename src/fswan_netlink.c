@@ -713,7 +713,7 @@ netlink_neigh_filter(__attribute__((unused)) struct sockaddr_nl *snl,
 }
 
 static int
-netlink_neigh_request(struct nl_handle *nl, uint32_t addr)
+netlink_neigh_request(struct nl_handle *nl, uint32_t addr, int ifindex)
 {
 	struct sockaddr_nl snl = { .nl_family = AF_NETLINK };
 	struct {
@@ -726,6 +726,7 @@ netlink_neigh_request(struct nl_handle *nl, uint32_t addr)
 		.nlh.nlmsg_type = RTM_GETNEIGH,
 		.nlh.nlmsg_seq = ++nl->seq,
 		.ndm.ndm_family = AF_INET,
+		.ndm.ndm_ifindex = ifindex,
 	};
 
 	addattr_l(&req.nlh, sizeof req, NDA_DST, &addr, sizeof addr);
@@ -739,9 +740,9 @@ netlink_neigh_request(struct nl_handle *nl, uint32_t addr)
 }
 
 int
-fswan_netlink_neigh_lookup(uint32_t addr)
+fswan_netlink_neigh_lookup(uint32_t addr, int ifindex)
 {
-	if (netlink_neigh_request(&nl_cmd, addr) < 0 ||
+	if (netlink_neigh_request(&nl_cmd, addr, ifindex) < 0 ||
 	    netlink_parse_info(netlink_neigh_filter, &nl_cmd, NULL, false) < 0)
 		return -1;
 	return 0;

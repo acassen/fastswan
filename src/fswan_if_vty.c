@@ -338,8 +338,8 @@ DEFUN(if_hairpin_to_nexthop,
 	}
 
 	if (fswan_hairpin_set(iface, addr))
-		vty_out(vty, "%% Cannot resolve nexthop %s on %s (NUD_FAILED)!"
-			     " will retry on neigh update%s"
+		vty_out(vty, "%% Cannot resolve nexthop %s on %s!"
+			     " Will retry on neigh or route update%s"
 			   , argv[0], iface->ifname, VTY_NEWLINE);
 
 	return CMD_SUCCESS;
