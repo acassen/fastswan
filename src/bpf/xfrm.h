@@ -42,37 +42,37 @@ struct parse_pkt {
 	__u16   l3_offset;
 };
 
-struct ipv4_lpm_key {
-	__u32	pfx_len;
-	__u32	pfx;
+/* Two-stage LPM matching.
+ *
+ * Stage 1: dst_lpm maps a dst prefix to a fixed 32-bit dst_id token.
+ * Stage 2: policy_lpm is keyed on (dst_id, src), prefixlen = 32 + src_bits.
+ */
+struct ipv4_dst_lpm_key {
+	__u32	prefixlen;	/* 0..32 */
+	__be32	dst;
 };
 
-struct ipv4_pfx {
-	__be32	mask;
-	__be32	addr;
+struct ipv4_policy_lpm_key {
+	__u32	prefixlen;	/* 32..64; 32 + src_bits */
+	__u32	dst_id;
+	__be32	src;
 };
 
-#define XFRM_POLICY_MAX_SRC_PFX	5
+#define XFRM_POLICY_MAX		262144	/* policy_lpm + stats slot capacity */
+#define XFRM_DST_MAX		65536	/* dst_lpm + dst_id token capacity */
+
 struct ipv4_xfrm_policy {
-	__u32	pfx_len;
-	__u32	pfx;
-	struct ipv4_pfx	src_pfx[XFRM_POLICY_MAX_SRC_PFX];
 	__u32	ifindex;
-
+	__u32	stats_slot;
 	__u8	flags;
 } __attribute__ ((__aligned__(8)));
 #define XFRM_POLICY_FL_INGRESS	(1 << 0)
 #define XFRM_POLICY_FL_EGRESS	(1 << 1)
 #define XFRM_POLICY_FL_NO_STATS	(1 << 2)
-#define XFRM_POLICY_FL_IGN_SRC	(1 << 3)
-
-struct xfrm_counters {
-	__u64	pkts;
-	__u64	bytes;
-} __attribute__ ((__aligned__(8)));
 
 struct xfrm_policy_stats {
-	struct xfrm_counters src_pfx[XFRM_POLICY_MAX_SRC_PFX];
+	__u64	pkts;
+	__u64	bytes;
 } __attribute__ ((__aligned__(8)));
 
 struct xfrm_offload_stats {

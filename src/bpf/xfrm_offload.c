@@ -44,18 +44,25 @@
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__uint(max_entries, 1024);
-	__uint(key_size, sizeof(struct ipv4_lpm_key));
-	__uint(value_size, sizeof(struct ipv4_xfrm_policy));
-} ipv4_xfrm_policy_lpm SEC(".maps");
+	__uint(max_entries, XFRM_DST_MAX);
+	__uint(key_size, sizeof(struct ipv4_dst_lpm_key));
+	__uint(value_size, sizeof(__u32));
+} dst_lpm SEC(".maps");
 
 struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__uint(max_entries, 1000000);
-	__type(key, sizeof(struct ipv4_lpm_key));
+	__uint(max_entries, XFRM_POLICY_MAX);
+	__uint(key_size, sizeof(struct ipv4_policy_lpm_key));
+	__uint(value_size, sizeof(struct ipv4_xfrm_policy));
+} policy_lpm SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, XFRM_POLICY_MAX);
+	__type(key, __u32);
 	__type(value, struct xfrm_policy_stats);
-} xfrm_policy_stats_hash SEC(".maps");
+} xfrm_policy_stats_array SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
@@ -90,22 +97,24 @@ ip_decrease_ttl(struct iphdr *iph)
  *	Stats related
  */
 static __always_inline int
-xfrm_stats_update(struct xdp_md *ctx, int ifindex_egress, struct ipv4_xfrm_policy *p, int idx)
+xfrm_stats_update(struct xdp_md *ctx, int ifindex_egress, struct ipv4_xfrm_policy *p)
 {
 	struct xfrm_offload_stats *ingress_stats, *egress_stats;
-	struct ipv4_lpm_key lpm_key;
 	struct xfrm_policy_stats *xp_stats;
 	__u32 ifindex_ingress = ctx->ingress_ifindex;
+	__u64 bytes = ctx->data_end - ctx->data;
+	__u32 slot;
 
-	if (!p || p->flags & XFRM_POLICY_FL_NO_STATS)
+	if (p->flags & XFRM_POLICY_FL_NO_STATS)
 		return 0;
 
-	lpm_key.pfx_len = p->pfx_len;
-	lpm_key.pfx = p->pfx;
-	xp_stats = bpf_map_lookup_elem(&xfrm_policy_stats_hash, &lpm_key);
-	if (xp_stats) {
-		xp_stats->src_pfx[idx].pkts++;
-		xp_stats->src_pfx[idx].bytes += (ctx->data_end - ctx->data);
+	slot = p->stats_slot;
+	if (slot < XFRM_POLICY_MAX) {
+		xp_stats = bpf_map_lookup_elem(&xfrm_policy_stats_array, &slot);
+		if (xp_stats) {
+			xp_stats->pkts++;
+			xp_stats->bytes += bytes;
+		}
 	}
 
 	ingress_stats = bpf_map_lookup_elem(&xfrm_offload_stats_hash, &ifindex_ingress);
@@ -113,10 +122,10 @@ xfrm_stats_update(struct xdp_md *ctx, int ifindex_egress, struct ipv4_xfrm_polic
 		return -1;
 
 	ingress_stats->rx_pkts++;
-	ingress_stats->rx_bytes += (ctx->data_end - ctx->data);
+	ingress_stats->rx_bytes += bytes;
 	if (ifindex_ingress == ifindex_egress) {
 		ingress_stats->tx_pkts++;
-		ingress_stats->tx_bytes += (ctx->data_end - ctx->data);
+		ingress_stats->tx_bytes += bytes;
 		return 0;
 	}
 
@@ -125,7 +134,7 @@ xfrm_stats_update(struct xdp_md *ctx, int ifindex_egress, struct ipv4_xfrm_polic
 		return -1;
 
 	egress_stats->tx_pkts++;
-	egress_stats->tx_bytes += (ctx->data_end - ctx->data);
+	egress_stats->tx_bytes += bytes;
 	return 0;
 }
 
@@ -133,7 +142,8 @@ xfrm_stats_update(struct xdp_md *ctx, int ifindex_egress, struct ipv4_xfrm_polic
  *	FIB lookup
  */
 static __always_inline int
-xfrm_fib_lookup(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph, struct ipv4_xfrm_policy *p, int idx)
+xfrm_fib_lookup(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph,
+		struct ipv4_xfrm_policy *p)
 {
 	struct bpf_fib_lookup fib_params;
 	int ret;
@@ -159,7 +169,7 @@ xfrm_fib_lookup(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph, stru
 
 	/* IPv4 Header TTL playground */
 	ip_decrease_ttl(iph);
-	xfrm_stats_update(ctx, fib_params.ifindex, p, idx);
+	xfrm_stats_update(ctx, fib_params.ifindex, p);
 
 	if (ctx->ingress_ifindex == fib_params.ifindex)
 		return XDP_TX;
@@ -174,7 +184,7 @@ xfrm_fib_lookup(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph, stru
  */
 static __always_inline int
 xfrm_hairpin_xmit(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph,
-		  struct ipv4_xfrm_policy *p, int idx)
+		  struct ipv4_xfrm_policy *p)
 {
 	const int vlan_sz = (int) sizeof(struct _vlan_hdr);
 	struct hairpin_nexthop *nh = NULL;
@@ -185,7 +195,7 @@ xfrm_hairpin_xmit(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph,
 	if (ingress < HAIRPIN_MAP_MAX_ENTRIES)
 		nh = bpf_map_lookup_elem(&hairpin_map, &ingress);
 	if (!nh || !nh->hdr_len)
-		return xfrm_fib_lookup(ctx, ethh, iph, p, idx);
+		return xfrm_fib_lookup(ctx, ethh, iph, p);
 
 	/* TTL while iph is still bounds-valid */
 	ip_decrease_ttl(iph);
@@ -208,31 +218,28 @@ xfrm_hairpin_xmit(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph,
 		__builtin_memcpy(data, nh->reformat, ETH_HLEN);
 	}
 
-	xfrm_stats_update(ctx, ingress, p, idx);
+	xfrm_stats_update(ctx, ingress, p);
 	return XDP_TX;
 }
 
 /*
- *	XFRM Policy check
+ *	XFRM Policy lookup
  */
-static __always_inline int
-xfrm_policy_match(struct iphdr *iph, struct ipv4_xfrm_policy *p, int *idx)
+static __always_inline struct ipv4_xfrm_policy *
+xfrm_policy_lookup(struct iphdr *iph)
 {
-	struct ipv4_pfx *src_pfx;
-	int i;
+	struct ipv4_dst_lpm_key dk = { .prefixlen = 32, .dst = iph->daddr };
+	struct ipv4_policy_lpm_key pk;
+	__u32 *dst_id;
 
-	if (p->flags & XFRM_POLICY_FL_IGN_SRC)
-		return 1;
+	dst_id = bpf_map_lookup_elem(&dst_lpm, &dk);
+	if (!dst_id)
+		return NULL;
 
-	for (i = 0; i < XFRM_POLICY_MAX_SRC_PFX; i++) {
-		src_pfx = &p->src_pfx[i];
-		if ((iph->saddr & src_pfx->mask) == src_pfx->addr) {
-			*idx = i;
-			return 1;
-		}
-	}
-
-	return 0;
+	pk.prefixlen = 64;
+	pk.dst_id = *dst_id;
+	pk.src = iph->saddr;
+	return bpf_map_lookup_elem(&policy_lpm, &pk);
 }
 
 static __always_inline int
@@ -240,30 +247,21 @@ xdp_xfrm_offload(struct parse_pkt *pkt)
 {
 	void *data_end = (void *) (long) pkt->ctx->data_end;
 	void *data = (void *) (long) pkt->ctx->data;
-	struct ipv4_xfrm_policy *p = NULL;
-	struct ipv4_lpm_key k;
+	struct ipv4_xfrm_policy *p;
 	struct ethhdr *ethh;
 	struct iphdr *iph;
-	int idx = 0;
 
 	ethh = data;
 	iph = data + pkt->l3_offset;
-	if (iph + 1 > data_end)
+	if ((void *) (iph + 1) > data_end)
 		return XDP_PASS;
 
 	/* FIXME: Add support to IPv6 */
 	if (ethh->h_proto != bpf_htons(ETH_P_IP))
 		return XDP_PASS;
 
-	/* XFRM Policy match */
-	k.pfx = iph->daddr;
-	k.pfx_len = 32;
-	p = bpf_map_lookup_elem(&ipv4_xfrm_policy_lpm, &k);
+	p = xfrm_policy_lookup(iph);
 	if (!p)
-		return XDP_PASS;
-
-	/* offload if src prefix match */
-	if (!xfrm_policy_match(iph, p, &idx))
 		return XDP_PASS;
 
 	/* Egress policy simply redirect to policy ifindex.
@@ -271,7 +269,7 @@ xdp_xfrm_offload(struct parse_pkt *pkt)
 	 * offload settings. */
 	if (p->flags & XFRM_POLICY_FL_EGRESS) {
 		ip_decrease_ttl(iph);
-		xfrm_stats_update(pkt->ctx, p->ifindex, p, idx);
+		xfrm_stats_update(pkt->ctx, p->ifindex, p);
 
 		if (pkt->ctx->ingress_ifindex == p->ifindex)
 			return XDP_TX;
@@ -279,7 +277,7 @@ xdp_xfrm_offload(struct parse_pkt *pkt)
 		return bpf_redirect(p->ifindex, 0);
 	}
 
-	return xfrm_hairpin_xmit(pkt->ctx, ethh, iph, p, idx);
+	return xfrm_hairpin_xmit(pkt->ctx, ethh, iph, p);
 }
 
 /*
