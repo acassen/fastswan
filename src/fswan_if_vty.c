@@ -302,8 +302,7 @@ DEFUN(if_no_shutdown,
       if_no_shutdown_cmd,
       "no shutdown",
       "Bring the interface up by attaching the bound bpf-program in XDP"
-      " driver mode; lazy-loads the BPF object if it isn't running yet and"
-      " seeds an xfrm_offload_stats slot for this ifindex\n")
+      " driver mode; lazy-loads the BPF object if it isn't running yet\n")
 {
 	struct interface *iface = vty->index;
 

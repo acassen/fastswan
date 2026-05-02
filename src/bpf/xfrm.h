@@ -75,15 +75,6 @@ struct xfrm_policy_stats {
 	__u64	bytes;
 } __attribute__ ((__aligned__(8)));
 
-struct xfrm_offload_stats {
-	__u32	ifindex;
-	__u64	rx_pkts;
-	__u64	rx_bytes;
-	__u64	tx_pkts;
-	__u64	tx_bytes;
-} __attribute__ ((__aligned__(8)));
-
-
 /* Hairpin-to-nexthop reformat record. One cache line per entry */
 #define HAIRPIN_REFORMAT_MAX	18	/* ETH_HLEN(14) + VLAN_HLEN(4) */
 #define HAIRPIN_CACHELINE	64

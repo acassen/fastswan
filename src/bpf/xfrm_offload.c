@@ -65,14 +65,6 @@ struct {
 } xfrm_policy_stats_array SEC(".maps");
 
 struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__uint(max_entries, 32);
-	__type(key, __u32);
-	__type(value, struct xfrm_offload_stats);
-} xfrm_offload_stats_hash SEC(".maps");
-
-struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, HAIRPIN_MAP_MAX_ENTRIES);
 	__type(key, __u32);
@@ -95,47 +87,29 @@ ip_decrease_ttl(struct iphdr *iph)
 
 /*
  *	Stats related
+ *
+ * Per-iface rx/tx counters live in ethtool; the data plane only updates
+ * the per-policy slot in xfrm_policy_stats_array.
  */
-static __always_inline int
-xfrm_stats_update(struct xdp_md *ctx, int ifindex_egress, struct ipv4_xfrm_policy *p)
+static __always_inline void
+xfrm_stats_update(struct xdp_md *ctx, struct ipv4_xfrm_policy *p)
 {
-	struct xfrm_offload_stats *ingress_stats, *egress_stats;
-	struct xfrm_policy_stats *xp_stats;
-	__u32 ifindex_ingress = ctx->ingress_ifindex;
-	__u64 bytes = ctx->data_end - ctx->data;
+	struct xfrm_policy_stats *s;
 	__u32 slot;
 
 	if (p->flags & XFRM_POLICY_FL_NO_STATS)
-		return 0;
+		return;
 
 	slot = p->stats_slot;
-	if (slot < XFRM_POLICY_MAX) {
-		xp_stats = bpf_map_lookup_elem(&xfrm_policy_stats_array, &slot);
-		if (xp_stats) {
-			xp_stats->pkts++;
-			xp_stats->bytes += bytes;
-		}
-	}
+	if (slot >= XFRM_POLICY_MAX)
+		return;
 
-	ingress_stats = bpf_map_lookup_elem(&xfrm_offload_stats_hash, &ifindex_ingress);
-	if (!ingress_stats)
-		return -1;
+	s = bpf_map_lookup_elem(&xfrm_policy_stats_array, &slot);
+	if (!s)
+		return;
 
-	ingress_stats->rx_pkts++;
-	ingress_stats->rx_bytes += bytes;
-	if (ifindex_ingress == ifindex_egress) {
-		ingress_stats->tx_pkts++;
-		ingress_stats->tx_bytes += bytes;
-		return 0;
-	}
-
-	egress_stats = bpf_map_lookup_elem(&xfrm_offload_stats_hash, &ifindex_egress);
-	if (!egress_stats)
-		return -1;
-
-	egress_stats->tx_pkts++;
-	egress_stats->tx_bytes += bytes;
-	return 0;
+	s->pkts++;
+	s->bytes += (ctx->data_end - ctx->data);
 }
 
 /*
@@ -169,7 +143,7 @@ xfrm_fib_lookup(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph,
 
 	/* IPv4 Header TTL playground */
 	ip_decrease_ttl(iph);
-	xfrm_stats_update(ctx, fib_params.ifindex, p);
+	xfrm_stats_update(ctx, p);
 
 	if (ctx->ingress_ifindex == fib_params.ifindex)
 		return XDP_TX;
@@ -218,7 +192,7 @@ xfrm_hairpin_xmit(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph,
 		__builtin_memcpy(data, nh->reformat, ETH_HLEN);
 	}
 
-	xfrm_stats_update(ctx, ingress, p);
+	xfrm_stats_update(ctx, p);
 	return XDP_TX;
 }
 
@@ -269,7 +243,7 @@ xdp_xfrm_offload(struct parse_pkt *pkt)
 	 * offload settings. */
 	if (p->flags & XFRM_POLICY_FL_EGRESS) {
 		ip_decrease_ttl(iph);
-		xfrm_stats_update(pkt->ctx, p->ifindex, p);
+		xfrm_stats_update(pkt->ctx, p);
 
 		if (pkt->ctx->ingress_ifindex == p->ifindex)
 			return XDP_TX;

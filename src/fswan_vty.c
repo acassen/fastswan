@@ -169,17 +169,6 @@ DEFUN(show_xdp_xfrm_offload_policy_stats,
 	return xdp_xfrm_show(vty, fswan_xfrm_policy_stats_vty, "policies");
 }
 
-DEFUN(show_xdp_xfrm_offload_stats,
-      show_xdp_xfrm_offload_stats_cmd,
-      "show xdp xfrm offload statistics",
-      SHOW_STR
-      "Dump aggregate per-interface RX/TX packet and byte counters"
-      " maintained by the XDP XFRM offload program\n")
-{
-	return xdp_xfrm_show(vty, fswan_xfrm_stats_vty, "statistics");
-}
-
-
 /*
  *	VTY init
  */
@@ -193,10 +182,8 @@ cmd_ext_fswan_install(void)
 	/* Install Global show commands */
 	install_element(VIEW_NODE, &show_xdp_xfrm_offload_policy_cmd);
 	install_element(VIEW_NODE, &show_xdp_xfrm_offload_policy_stats_cmd);
-	install_element(VIEW_NODE, &show_xdp_xfrm_offload_stats_cmd);
 	install_element(ENABLE_NODE, &show_xdp_xfrm_offload_policy_cmd);
 	install_element(ENABLE_NODE, &show_xdp_xfrm_offload_policy_stats_cmd);
-	install_element(ENABLE_NODE, &show_xdp_xfrm_offload_stats_cmd);
 
 	return 0;
 }

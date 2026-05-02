@@ -33,7 +33,6 @@ enum {
 	FSWAN_BPF_MAP_DST_LPM = 0,
 	FSWAN_BPF_MAP_POLICY_LPM,
 	FSWAN_BPF_MAP_POLICY_STATS_ARRAY,
-	FSWAN_BPF_MAP_STATS_HASH,
 	FSWAN_BPF_MAP_HAIRPIN,
 	FSWAN_BPF_MAP_CNT
 };
@@ -67,14 +66,6 @@ struct xfrm_policy_stats {
 	__u64	bytes;
 } __attribute__ ((__aligned__(8)));
 
-struct xfrm_offload_stats {
-	__u32	ifindex;
-	__u64	rx_pkts;
-	__u64	rx_bytes;
-	__u64	tx_pkts;
-	__u64	tx_bytes;
-} __attribute__ ((__aligned__(8)));
-
 /* Hairpin-to-nexthop reformat record (mirror of struct in src/bpf/xfrm.h) */
 #define HAIRPIN_REFORMAT_MAX	18
 #define HAIRPIN_CACHELINE	64
@@ -90,8 +81,5 @@ struct hairpin_nexthop {
 /* Prototypes */
 int fswan_xfrm_policy_vty(struct vty *vty);
 int fswan_xfrm_policy_stats_vty(struct vty *vty);
-int fswan_xfrm_stats_vty(struct vty *vty);
 int fswan_bpf_xfrm_map_load(struct fswan_bpf_prog *p);
-int fswan_bpf_xfrm_stats_iface_register(struct fswan_bpf_prog *p, struct interface *iface);
-int fswan_bpf_xfrm_stats_iface_unregister(struct fswan_bpf_prog *p, struct interface *iface);
 int fswan_bpf_xfrm_action(int, struct xfrm_policy *);

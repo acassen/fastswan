@@ -64,12 +64,6 @@ struct interface {
 	/* hairpin-to-nexthop config (NULL if not configured) */
 	struct fswan_hairpin	*hairpin;
 
-	/* xfrm-offload aggregate counters (BPF map readback) */
-	uint64_t		rx_pkts;
-	uint64_t		rx_bytes;
-	uint64_t		tx_pkts;
-	uint64_t		tx_bytes;
-
 	/* ethtool PHY counters + derived rates (refreshed every ETHTOOL_POLL_TICKS) */
 	struct ethtool_phy_stats phy_stats;
 	uint64_t		rx_bw_bps;
