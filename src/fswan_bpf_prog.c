@@ -75,6 +75,9 @@ fswan_bpf_prog_alloc(const char *name)
 	INIT_LIST_HEAD(&new->next);
 	__set_bit(FSWAN_BPF_PROG_FL_SHUTDOWN_BIT, &new->flags);
 
+	/* Reserve stats slot 0 as the "stats disabled" sentinel */
+	__set_bit_array(0, new->stats_slot_bitmap);
+
 	list_add_tail(&new->next, &daemon_data->bpf_progs);
 	return new;
 }

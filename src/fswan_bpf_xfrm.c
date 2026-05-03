@@ -154,6 +154,9 @@ fswan_bpf_xfrm_dst_id_put(struct fswan_bpf_prog *opts, __be32 daddr,
 
 /*
  *	Per-policy stats slot
+ *
+ *	Slot 0 is the BPF-side "stats disabled" sentinel (reserved at
+ *	prog alloc).
  */
 static int
 fswan_bpf_xfrm_stats_slot_zero(struct fswan_bpf_prog *opts, uint32_t slot)
@@ -173,6 +176,30 @@ fswan_bpf_xfrm_stats_slot_zero(struct fswan_bpf_prog *opts, uint32_t slot)
 	return err;
 }
 
+static int
+fswan_bpf_xfrm_stats_slot_alloc(struct fswan_bpf_prog *opts)
+{
+	int slot;
+
+	if (__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags))
+		return 0;
+
+	slot = fswan_bpf_bitmap_alloc(opts->stats_slot_bitmap, XFRM_POLICY_MAX);
+	if (slot < 0)
+		return -1;
+
+	fswan_bpf_xfrm_stats_slot_zero(opts, slot);
+	return slot;
+}
+
+static void
+fswan_bpf_xfrm_stats_slot_free(struct fswan_bpf_prog *opts, uint32_t slot)
+{
+	if (!slot)
+		return;
+	fswan_bpf_bitmap_free(opts->stats_slot_bitmap, slot, XFRM_POLICY_MAX);
+}
+
 
 /*
  *	XFRM Policy add/del
@@ -188,8 +215,6 @@ fswan_bpf_xfrm_policy_value_set(struct xfrm_policy *p, struct ipv4_xfrm_policy *
 		v->flags |= XFRM_POLICY_FL_INGRESS;
 	if (__test_bit(XFRM_POLICY_FL_OUT_BIT, &p->flags))
 		v->flags |= XFRM_POLICY_FL_EGRESS;
-	if (__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags))
-		v->flags |= XFRM_POLICY_FL_NO_STATS;
 }
 
 static void
@@ -214,29 +239,31 @@ fswan_bpf_xfrm_lpm_add(struct fswan_bpf_prog *opts, struct xfrm_policy *p)
 	if (err)
 		return err;
 
-	slot = fswan_bpf_bitmap_alloc(opts->stats_slot_bitmap, XFRM_POLICY_MAX);
+	slot = fswan_bpf_xfrm_stats_slot_alloc(opts);
 	if (slot < 0) {
-		fswan_bpf_xfrm_dst_id_put(opts, p->daddr.a4, p->prefixlen_d, dst_id);
 		log_message(LOG_INFO, "%s(): Out of stats slots for xfrm policy"
 					" %u.%u.%u.%u/%d"
 				    , __FUNCTION__
 				    , NIPQUAD(p->daddr.a4), p->prefixlen_d);
-		return -1;
+		err = -1;
+		goto err_dst_id;
 	}
 
-	fswan_bpf_xfrm_stats_slot_zero(opts, slot);
 	fswan_bpf_xfrm_policy_value_set(p, &val, slot);
 	fswan_bpf_xfrm_policy_key_set(p, dst_id, &key);
 
 	err = bpf_map__update_elem(policy_map, &key, sizeof(key), &val, sizeof(val),
 				   BPF_NOEXIST);
-	if (err) {
-		fswan_bpf_bitmap_free(opts->stats_slot_bitmap, slot, XFRM_POLICY_MAX);
-		fswan_bpf_xfrm_dst_id_put(opts, p->daddr.a4, p->prefixlen_d, dst_id);
-		return err;
-	}
+	if (err)
+		goto err_slot;
 
 	return 0;
+
+ err_slot:
+	fswan_bpf_xfrm_stats_slot_free(opts, slot);
+ err_dst_id:
+	fswan_bpf_xfrm_dst_id_put(opts, p->daddr.a4, p->prefixlen_d, dst_id);
+	return err;
 }
 
 static int
@@ -265,7 +292,7 @@ fswan_bpf_xfrm_lpm_del(struct fswan_bpf_prog *opts, struct xfrm_policy *p)
 	if (err)
 		return err;
 
-	fswan_bpf_bitmap_free(opts->stats_slot_bitmap, val.stats_slot, XFRM_POLICY_MAX);
+	fswan_bpf_xfrm_stats_slot_free(opts, val.stats_slot);
 	fswan_bpf_xfrm_dst_id_put(opts, p->daddr.a4, p->prefixlen_d, dst_id);
 	return 0;
 }
@@ -348,7 +375,7 @@ fswan_bpf_xfrm_policy_counters_vty(struct vty *vty, struct fswan_bpf_prog *opts,
 	size_t sz = nr_cpus * sizeof(*s);
 	int i, err;
 
-	if (slot >= XFRM_POLICY_MAX)
+	if (!slot || slot >= XFRM_POLICY_MAX)
 		return;
 
 	s = calloc(nr_cpus, sizeof(*s));

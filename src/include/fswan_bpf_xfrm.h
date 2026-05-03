@@ -39,7 +39,6 @@ enum {
 
 #define XFRM_POLICY_FL_INGRESS	(1 << 0)
 #define XFRM_POLICY_FL_EGRESS	(1 << 1)
-#define XFRM_POLICY_FL_NO_STATS	(1 << 2)
 
 #define XFRM_POLICY_MAX		262144
 #define XFRM_DST_MAX		65536

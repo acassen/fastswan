@@ -63,12 +63,11 @@ struct ipv4_policy_lpm_key {
 
 struct ipv4_xfrm_policy {
 	__u32	ifindex;
-	__u32	stats_slot;
+	__u32	stats_slot;	/* 0 means stats disabled */
 	__u8	flags;
 } __attribute__ ((__aligned__(8)));
 #define XFRM_POLICY_FL_INGRESS	(1 << 0)
 #define XFRM_POLICY_FL_EGRESS	(1 << 1)
-#define XFRM_POLICY_FL_NO_STATS	(1 << 2)
 
 struct xfrm_policy_stats {
 	__u64	pkts;

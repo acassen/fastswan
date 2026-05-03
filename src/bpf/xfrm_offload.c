@@ -87,21 +87,14 @@ ip_decrease_ttl(struct iphdr *iph)
 
 /*
  *	Stats related
- *
- * Per-iface rx/tx counters live in ethtool; the data plane only updates
- * the per-policy slot in xfrm_policy_stats_array.
  */
 static __always_inline void
 xfrm_stats_update(struct xdp_md *ctx, struct ipv4_xfrm_policy *p)
 {
 	struct xfrm_policy_stats *s;
-	__u32 slot;
+	__u32 slot = p->stats_slot;
 
-	if (p->flags & XFRM_POLICY_FL_NO_STATS)
-		return;
-
-	slot = p->stats_slot;
-	if (slot >= XFRM_POLICY_MAX)
+	if (unlikely(!slot))
 		return;
 
 	s = bpf_map_lookup_elem(&xfrm_policy_stats_array, &slot);
@@ -116,10 +109,11 @@ xfrm_stats_update(struct xdp_md *ctx, struct ipv4_xfrm_policy *p)
  *	FIB lookup
  */
 static __always_inline int
-xfrm_fib_lookup(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph,
-		struct ipv4_xfrm_policy *p)
+xfrm_fib_lookup(struct xdp_md *ctx, struct iphdr *iph, struct ipv4_xfrm_policy *p)
 {
 	struct bpf_fib_lookup fib_params;
+	void *data, *data_end;
+	struct ethhdr *ethh;
 	int ret;
 
 	__builtin_memset(&fib_params, 0, sizeof(fib_params));
@@ -138,6 +132,11 @@ xfrm_fib_lookup(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph,
 		return XDP_PASS;
 
 	/* Ethernet playground */
+	data     = (void *) (long) ctx->data;
+	data_end = (void *) (long) ctx->data_end;
+	ethh     = data;
+	if ((void *) (ethh + 1) > data_end)
+		return XDP_PASS;
 	__builtin_memcpy(ethh->h_dest, fib_params.dmac, ETH_ALEN);
 	__builtin_memcpy(ethh->h_source, fib_params.smac, ETH_ALEN);
 
@@ -157,8 +156,7 @@ xfrm_fib_lookup(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph,
  * Input is always untagged (post-IPsec-decap).
  */
 static __always_inline int
-xfrm_hairpin_xmit(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph,
-		  struct ipv4_xfrm_policy *p)
+xfrm_hairpin_xmit(struct xdp_md *ctx, struct iphdr *iph, struct ipv4_xfrm_policy *p)
 {
 	const int vlan_sz = (int) sizeof(struct _vlan_hdr);
 	struct hairpin_nexthop *nh = NULL;
@@ -169,7 +167,7 @@ xfrm_hairpin_xmit(struct xdp_md *ctx, struct ethhdr *ethh, struct iphdr *iph,
 	if (ingress < HAIRPIN_MAP_MAX_ENTRIES)
 		nh = bpf_map_lookup_elem(&hairpin_map, &ingress);
 	if (!nh || !nh->hdr_len)
-		return xfrm_fib_lookup(ctx, ethh, iph, p);
+		return xfrm_fib_lookup(ctx, iph, p);
 
 	/* TTL while iph is still bounds-valid */
 	ip_decrease_ttl(iph);
@@ -207,7 +205,7 @@ xfrm_policy_lookup(struct iphdr *iph)
 	__u32 *dst_id;
 
 	dst_id = bpf_map_lookup_elem(&dst_lpm, &dk);
-	if (!dst_id)
+	if (unlikely(!dst_id))
 		return NULL;
 
 	pk.prefixlen = 64;
@@ -222,16 +220,10 @@ xdp_xfrm_offload(struct parse_pkt *pkt)
 	void *data_end = (void *) (long) pkt->ctx->data_end;
 	void *data = (void *) (long) pkt->ctx->data;
 	struct ipv4_xfrm_policy *p;
-	struct ethhdr *ethh;
 	struct iphdr *iph;
 
-	ethh = data;
 	iph = data + pkt->l3_offset;
-	if ((void *) (iph + 1) > data_end)
-		return XDP_PASS;
-
-	/* FIXME: Add support to IPv6 */
-	if (ethh->h_proto != bpf_htons(ETH_P_IP))
+	if (unlikely((void *) (iph + 1) > data_end))
 		return XDP_PASS;
 
 	p = xfrm_policy_lookup(iph);
@@ -251,7 +243,7 @@ xdp_xfrm_offload(struct parse_pkt *pkt)
 		return bpf_redirect(p->ifindex, 0);
 	}
 
-	return xfrm_hairpin_xmit(pkt->ctx, ethh, iph, p);
+	return xfrm_hairpin_xmit(pkt->ctx, iph, p);
 }
 
 /*
@@ -270,7 +262,7 @@ parse_eth_frame(struct parse_pkt *pkt)
 	offset = sizeof(*eth);
 
 	/* Make sure packet is large enough for parsing eth */
-	if ((void *) eth + offset > data_end)
+	if (unlikely((void *) eth + offset > data_end))
 		return false;
 
 	eth_type = eth->h_proto;
@@ -282,12 +274,15 @@ parse_eth_frame(struct parse_pkt *pkt)
 		vlan = bpf_ntohs(vlan_hdr->hvlan_TCI);
 		pkt->vlan_id = vlan & 0x0fff;
 		offset += sizeof (*vlan_hdr);
-		if ((void *) eth + offset > data_end)
+		if (unlikely((void *) eth + offset > data_end))
 			return false;
 
 		eth_type = vlan_hdr->h_vlan_encapsulated_proto;
-		vlan_hdr->hvlan_TCI = bpf_htons(pkt->vlan_id);
 	}
+
+	/* FIXME: Add support to IPv6 */
+	if (eth_type != bpf_htons(ETH_P_IP))
+		return false;
 
 	pkt->l3_proto = bpf_ntohs(eth_type);
 	pkt->l3_offset = offset;
