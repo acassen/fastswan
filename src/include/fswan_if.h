@@ -30,6 +30,7 @@
 
 #include "list_head.h"
 #include "ethtool.h"
+#include "gauge.h"
 
 /* Forward declarations */
 struct bpf_link;
@@ -43,13 +44,16 @@ enum fswan_interface_flags {
 	FSWAN_INTERFACE_FL_DESTROYING_BIT,
 };
 
-/* One direction of a rate-tracked counter source: holds the derived rates
- * and the previous absolute counters used as the rate baseline. */
+/* One direction of a rate-tracked counter source: holds the derived rates,
+ * the previous absolute counters used as the rate baseline, and the rolling
+ * history fed every ETHTOOL_POLL_TICKS. */
 struct iface_rate {
-	uint64_t	bw_bps;
-	uint64_t	pps;
-	uint64_t	prev_bytes;
-	uint64_t	prev_pkts;
+	uint64_t		bw_bps;
+	uint64_t		pps;
+	uint64_t		prev_bytes;
+	uint64_t		prev_pkts;
+	struct gauge_history	bw_history;
+	struct gauge_history	pps_history;
 };
 
 /* Types */

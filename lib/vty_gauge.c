@@ -384,20 +384,22 @@ gauge_braille_graph(struct vty *vty, const char *label, float ratio,
 	int samples = h->count < needed ? h->count : needed;
 	int pad_cells = width - (samples + 1) / 2;
 	int base = h->count - samples;
-	int cell, row;
+	int cell, row, li, ri;
+	float ls, rs, col_ratio;
+	uint8_t mask;
+	char glyph[4];
 
 	vty_out(vty, "%-*s  %s", label_w, label, left);
 	for (cell = 0; cell < pad_cells; cell++)
 		vty_out(vty, " ");
 
 	for (cell = 0; cell < width - pad_cells; cell++) {
-		int li = base + cell * 2;
-		int ri = li + 1;
-		float ls = (li < h->count) ? gauge_history_get(h, li) : 0.0f;
-		float rs = (ri < h->count) ? gauge_history_get(h, ri) : 0.0f;
-		float col_ratio = (rs > ls) ? rs : ls;
-		uint8_t mask = 0;
-		char glyph[4];
+		li = base + cell * 2;
+		ri = li + 1;
+		ls = (li < h->count) ? gauge_history_get(h, li) : 0.0f;
+		rs = (ri < h->count) ? gauge_history_get(h, ri) : 0.0f;
+		col_ratio = (rs > ls) ? rs : ls;
+		mask = 0;
 
 		for (row = 0; row < 4; row++) {
 			if (ls >= braille_thresh[row])

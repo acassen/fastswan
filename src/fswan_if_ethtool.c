@@ -40,6 +40,8 @@ update_rate(struct iface_rate *r, uint64_t cur_bytes, uint64_t cur_pkts,
 	}
 	r->prev_bytes = cur_bytes;
 	r->prev_pkts = cur_pkts;
+	gauge_history_push(&r->bw_history, (float) r->bw_bps);
+	gauge_history_push(&r->pps_history, (float) r->pps);
 }
 
 int
