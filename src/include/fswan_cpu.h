@@ -27,6 +27,14 @@
 #include "gauge.h"
 
 
+/* One direction's rate estimates plus their EWMA-smoothed versions. */
+struct percpu_rate {
+	uint64_t		bw_bps;
+	uint64_t		pps;
+	double			bw_bps_ewma;
+	double			pps_ewma;
+};
+
 struct fswan_percpu_metrics {
 	float			load;			/* [0.0, 1.0] */
 	float			load_ewma;		/* EWMA-smoothed load */
@@ -34,27 +42,18 @@ struct fswan_percpu_metrics {
 
 	/* Accumulation fields: zeroed before each ethtool tick. */
 	struct ethtool_q_stats	q_stats;
+	struct ethtool_q_stats	prev_q_stats;
 
 	/* Rate estimates derived from q_stats deltas. */
-	uint64_t		rx_bw_bps;
-	uint64_t		tx_bw_bps;
+	struct percpu_rate	rx;
+	struct percpu_rate	tx;
 	uint64_t		total_bw_bps;
-	uint64_t		rx_pps;
-	uint64_t		tx_pps;
-	uint64_t		rx_buff_alloc_err_rate;
-
-	/* EWMA-smoothed traffic rates */
-	double			rx_bw_bps_ewma;
-	double			tx_bw_bps_ewma;
 	double			total_bw_bps_ewma;
-	double			rx_pps_ewma;
-	double			tx_pps_ewma;
+	uint64_t		rx_buff_alloc_err_rate;
 
 	/* Traffic rate history (fed every ethtool tick, ~3s per sample) */
 	struct gauge_history	bw_history;
 	struct gauge_history	pps_history;
-
-	struct ethtool_q_stats	prev_q_stats;
 };
 
 /* Prototypes */

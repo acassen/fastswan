@@ -102,45 +102,51 @@ fswan_percpu_sample_all(uint64_t now_ns)
 	fswan_if_foreach(fswan_iface_sample, &now_ns);
 }
 
+static inline void
+ewma_update(double *ewma, double cur)
+{
+	*ewma = EWMA_DEFAULT_ALPHA * cur + (1.0 - EWMA_DEFAULT_ALPHA) * *ewma;
+}
+
+static inline uint64_t
+delta_rate(uint64_t cur, uint64_t prev, uint64_t elapsed)
+{
+	return (cur - prev) * NSEC_PER_SEC / elapsed;
+}
+
 void
 fswan_percpu_rates_update(uint64_t now_ns)
 {
 	uint64_t elapsed = now_ns - percpu_prev_ts_ns;
+	struct ethtool_q_stats *q, *p;
 	struct fswan_percpu_metrics *m;
 	int i;
 
 	for (i = 0; i < cpu_load->nr_cpus; i++) {
 		m = &percpu_back[i];
+		q = &m->q_stats;
+		p = &m->prev_q_stats;
 
 		if (elapsed && percpu_prev_ts_ns) {
-			m->rx_bw_bps = (m->q_stats.rx_bytes - m->prev_q_stats.rx_bytes)
-				       * NSEC_PER_SEC / elapsed;
-			m->tx_bw_bps = (m->q_stats.tx_bytes - m->prev_q_stats.tx_bytes)
-				       * NSEC_PER_SEC / elapsed;
-			m->total_bw_bps = m->rx_bw_bps + m->tx_bw_bps;
-			m->rx_pps = (m->q_stats.rx_packets - m->prev_q_stats.rx_packets)
-				    * NSEC_PER_SEC / elapsed;
-			m->tx_pps = (m->q_stats.tx_packets - m->prev_q_stats.tx_packets)
-				    * NSEC_PER_SEC / elapsed;
-			m->rx_buff_alloc_err_rate = (m->q_stats.rx_buff_alloc_err
-						     - m->prev_q_stats.rx_buff_alloc_err)
-						    * NSEC_PER_SEC / elapsed;
+			m->rx.bw_bps = delta_rate(q->rx_bytes, p->rx_bytes, elapsed);
+			m->tx.bw_bps = delta_rate(q->tx_bytes, p->tx_bytes, elapsed);
+			m->rx.pps = delta_rate(q->rx_packets, p->rx_packets, elapsed);
+			m->tx.pps = delta_rate(q->tx_packets, p->tx_packets, elapsed);
+			m->total_bw_bps = m->rx.bw_bps + m->tx.bw_bps;
+			m->rx_buff_alloc_err_rate = delta_rate(q->rx_buff_alloc_err,
+							       p->rx_buff_alloc_err,
+							       elapsed);
 		}
-		m->rx_bw_bps_ewma = EWMA_DEFAULT_ALPHA * m->rx_bw_bps
-				   + (1.0 - EWMA_DEFAULT_ALPHA) * m->rx_bw_bps_ewma;
-		m->tx_bw_bps_ewma = EWMA_DEFAULT_ALPHA * m->tx_bw_bps
-				   + (1.0 - EWMA_DEFAULT_ALPHA) * m->tx_bw_bps_ewma;
-		m->total_bw_bps_ewma = EWMA_DEFAULT_ALPHA * m->total_bw_bps
-				     + (1.0 - EWMA_DEFAULT_ALPHA) * m->total_bw_bps_ewma;
-		m->rx_pps_ewma = EWMA_DEFAULT_ALPHA * m->rx_pps
-			       + (1.0 - EWMA_DEFAULT_ALPHA) * m->rx_pps_ewma;
-		m->tx_pps_ewma = EWMA_DEFAULT_ALPHA * m->tx_pps
-			       + (1.0 - EWMA_DEFAULT_ALPHA) * m->tx_pps_ewma;
+		ewma_update(&m->rx.bw_bps_ewma, m->rx.bw_bps);
+		ewma_update(&m->tx.bw_bps_ewma, m->tx.bw_bps);
+		ewma_update(&m->total_bw_bps_ewma, m->total_bw_bps);
+		ewma_update(&m->rx.pps_ewma, m->rx.pps);
+		ewma_update(&m->tx.pps_ewma, m->tx.pps);
 
 		gauge_history_push(&m->bw_history, (float) m->total_bw_bps);
-		gauge_history_push(&m->pps_history, (float) (m->rx_pps + m->tx_pps));
+		gauge_history_push(&m->pps_history, (float) (m->rx.pps + m->tx.pps));
 
-		m->prev_q_stats = m->q_stats;
+		*p = *q;
 	}
 	percpu_prev_ts_ns = now_ns;
 }
