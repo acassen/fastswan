@@ -43,6 +43,15 @@ enum fswan_interface_flags {
 	FSWAN_INTERFACE_FL_DESTROYING_BIT,
 };
 
+/* One direction of a rate-tracked counter source: holds the derived rates
+ * and the previous absolute counters used as the rate baseline. */
+struct iface_rate {
+	uint64_t	bw_bps;
+	uint64_t	pps;
+	uint64_t	prev_bytes;
+	uint64_t	prev_pkts;
+};
+
 /* Types */
 struct interface {
 	char			ifname[IF_NAMESIZE];
@@ -66,14 +75,11 @@ struct interface {
 
 	/* ethtool PHY counters + derived rates (refreshed every ETHTOOL_POLL_TICKS) */
 	struct ethtool_phy_stats phy_stats;
-	uint64_t		rx_bw_bps;
-	uint64_t		tx_bw_bps;
-	uint64_t		rx_pps;
-	uint64_t		tx_pps;
-	uint64_t		prev_rx_bytes;
-	uint64_t		prev_tx_bytes;
-	uint64_t		prev_rx_packets;
-	uint64_t		prev_tx_packets;
+	struct ethtool_ipsec_stats ipsec_stats;
+	struct iface_rate	rx;
+	struct iface_rate	tx;
+	struct iface_rate	ipsec_rx;
+	struct iface_rate	ipsec_tx;
 	uint64_t		prev_ts_ns;
 
 	/* per-queue ethtool stats; array of max(nr_rx_queues, nr_tx_queues) */

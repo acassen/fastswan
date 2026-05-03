@@ -73,68 +73,93 @@ pps_format(uint64_t pps, char *buf, size_t len)
 		snprintf(buf, len, "%llupps", (unsigned long long)pps);
 }
 
+static void
+stat_pair_vty(struct vty *vty, const char *l1, uint64_t v1,
+	  const char *l2, uint64_t v2)
+{
+	vty_out(vty, "    %-24s %-14lu  %-24s %lu%s",
+		l1, v1, l2, v2, VTY_NEWLINE);
+}
+
+static void
+bandwidth_vty(struct vty *vty, const struct iface_rate *rx,
+		const struct iface_rate *tx)
+{
+	char rxbw[20], txbw[20], rxpps[20], txpps[20];
+
+	bw_format(rx->bw_bps, rxbw, sizeof(rxbw));
+	bw_format(tx->bw_bps, txbw, sizeof(txbw));
+	pps_format(rx->pps, rxpps, sizeof(rxpps));
+	pps_format(tx->pps, txpps, sizeof(txpps));
+	vty_out(vty, "  Bandwidth: rx:%s  tx:%s  |  PPS: rx:%s  tx:%s%s",
+		rxbw, txbw, rxpps, txpps, VTY_NEWLINE);
+}
+
 static int
-fswan_if_stats_show_summary(struct interface *iface, void *arg)
+fswan_if_stats_summary_vty(struct interface *iface, void *arg)
 {
 	const struct ethtool_phy_stats *s = &iface->phy_stats;
 	struct vty *vty = arg;
 	char rxbw[20], txbw[20], rxpps[20], txpps[20];
 
-	bw_format(iface->rx_bw_bps, rxbw, sizeof(rxbw));
-	bw_format(iface->tx_bw_bps, txbw, sizeof(txbw));
-	pps_format(iface->rx_pps, rxpps, sizeof(rxpps));
-	pps_format(iface->tx_pps, txpps, sizeof(txpps));
-	vty_out(vty, "%-16s  %14llu  %14llu  %14llu  %14llu  %14s  %14s  %14s  %14s%s",
+	bw_format(iface->rx.bw_bps, rxbw, sizeof(rxbw));
+	bw_format(iface->tx.bw_bps, txbw, sizeof(txbw));
+	pps_format(iface->rx.pps, rxpps, sizeof(rxpps));
+	pps_format(iface->tx.pps, txpps, sizeof(txpps));
+	vty_out(vty, "%-16s  %14lu  %14lu  %14lu  %14lu  %14s  %14s  %14s  %14s%s",
 		iface->ifname,
-		(unsigned long long)s->rx_packets,
-		(unsigned long long)s->tx_packets,
-		(unsigned long long)s->rx_bytes,
-		(unsigned long long)s->tx_bytes,
+		s->rx_packets, s->tx_packets,
+		s->rx_bytes, s->tx_bytes,
 		rxbw, txbw, rxpps, txpps, VTY_NEWLINE);
 	return 0;
 }
 
 static void
-fswan_if_stats_show_detail(struct vty *vty, struct interface *iface)
+fswan_if_stats_phy_vty(struct vty *vty, const struct interface *iface)
 {
 	const struct ethtool_phy_stats *p = &iface->phy_stats;
-	char rxbw[20], txbw[20], rxpps[20], txpps[20];
+
+	vty_out(vty, "  PHY counters:%s", VTY_NEWLINE);
+	stat_pair_vty(vty, "rx_packets:", p->rx_packets, "tx_packets:", p->tx_packets);
+	stat_pair_vty(vty, "rx_bytes:", p->rx_bytes, "tx_bytes:", p->tx_bytes);
+	stat_pair_vty(vty, "rx_discards:", p->rx_discards, "tx_discards:", p->tx_discards);
+	vty_out(vty, "    %-24s %lu%s",
+		"tx_errors:", p->tx_errors, VTY_NEWLINE);
+	bandwidth_vty(vty, &iface->rx, &iface->tx);
+}
+
+static void
+fswan_if_stats_ipsec_vty(struct vty *vty, const struct interface *iface)
+{
+	const struct ethtool_ipsec_stats *s = &iface->ipsec_stats;
+
+	if (!iface->ethtool_cache || !iface->ethtool_cache->n_ipsec)
+		return;
+
+	vty_out(vty, "  IPsec offload counters:%s", VTY_NEWLINE);
+	stat_pair_vty(vty, "rx_pkts:", s->rx_pkts, "tx_pkts:", s->tx_pkts);
+	stat_pair_vty(vty, "rx_bytes:", s->rx_bytes, "tx_bytes:", s->tx_bytes);
+	stat_pair_vty(vty, "rx_drop_pkts:", s->rx_drop_pkts,
+		       "tx_drop_pkts:", s->tx_drop_pkts);
+	stat_pair_vty(vty, "rx_drop_bytes:", s->rx_drop_bytes,
+		       "tx_drop_bytes:", s->tx_drop_bytes);
+	bandwidth_vty(vty, &iface->ipsec_rx, &iface->ipsec_tx);
+}
+
+static void
+fswan_if_stats_queues_vty(struct vty *vty, const struct interface *iface)
+{
 	uint32_t q, nr;
 	int *cpu_per_q;
 
-	bw_format(iface->rx_bw_bps, rxbw, sizeof(rxbw));
-	bw_format(iface->tx_bw_bps, txbw, sizeof(txbw));
-	pps_format(iface->rx_pps, rxpps, sizeof(rxpps));
-	pps_format(iface->tx_pps, txpps, sizeof(txpps));
-
-	vty_out(vty, "Interface %s%s", iface->ifname, VTY_NEWLINE);
-	vty_out(vty, "  PHY counters:%s", VTY_NEWLINE);
-	vty_out(vty, "    %-24s %-14llu  %-24s %llu%s",
-		"rx_packets:", (unsigned long long)p->rx_packets,
-		"tx_packets:", (unsigned long long)p->tx_packets, VTY_NEWLINE);
-	vty_out(vty, "    %-24s %-14llu  %-24s %llu%s",
-		"rx_bytes:", (unsigned long long)p->rx_bytes,
-		"tx_bytes:", (unsigned long long)p->tx_bytes, VTY_NEWLINE);
-	vty_out(vty, "    %-24s %-14llu  %-24s %llu%s",
-		"rx_discards:", (unsigned long long)p->rx_discards,
-		"tx_discards:", (unsigned long long)p->tx_discards, VTY_NEWLINE);
-	vty_out(vty, "    %-24s %llu%s",
-		"tx_errors:", (unsigned long long)p->tx_errors, VTY_NEWLINE);
-	vty_out(vty, "  Bandwidth: rx:%s  tx:%s  |  PPS: rx:%s  tx:%s%s",
-		rxbw, txbw, rxpps, txpps, VTY_NEWLINE);
-
-	if (!iface->queue_stats || !(iface->nr_rx_queues | iface->nr_tx_queues)) {
-		vty_out(vty, "%s", VTY_NEWLINE);
+	if (!iface->queue_stats || !(iface->nr_rx_queues | iface->nr_tx_queues))
 		return;
-	}
 
 	nr = iface->nr_rx_queues > iface->nr_tx_queues ?
 	     iface->nr_rx_queues : iface->nr_tx_queues;
 	cpu_per_q = calloc(nr, sizeof(*cpu_per_q));
-	if (!cpu_per_q) {
-		vty_out(vty, "%s", VTY_NEWLINE);
+	if (!cpu_per_q)
 		return;
-	}
 	memset(cpu_per_q, -1, nr * sizeof(*cpu_per_q));
 	fswan_if_rxq_cpu(iface, cpu_per_q, nr);
 
@@ -144,20 +169,26 @@ fswan_if_stats_show_detail(struct vty *vty, struct interface *iface)
 		"tx_packets", "tx_bytes", VTY_NEWLINE);
 	for (q = 0; q < nr; q++) {
 		const struct ethtool_q_stats *qs = &iface->queue_stats[q];
-		vty_out(vty, "    %3u  %4d  %14llu  %14llu  %12llu  %14llu  %14llu%s",
+		vty_out(vty, "    %3u  %4d  %14lu  %14lu  %12lu  %14lu  %14lu%s",
 			q, cpu_per_q[q],
-			(unsigned long long)qs->rx_packets,
-			(unsigned long long)qs->rx_bytes,
-			(unsigned long long)qs->rx_xdp_drop,
-			(unsigned long long)qs->tx_packets,
-			(unsigned long long)qs->tx_bytes, VTY_NEWLINE);
+			qs->rx_packets, qs->rx_bytes, qs->rx_xdp_drop,
+			qs->tx_packets, qs->tx_bytes, VTY_NEWLINE);
 	}
 	free(cpu_per_q);
+}
+
+static void
+fswan_if_stats_detail_vty(struct vty *vty, struct interface *iface)
+{
+	vty_out(vty, "Interface %s%s", iface->ifname, VTY_NEWLINE);
+	fswan_if_stats_phy_vty(vty, iface);
+	fswan_if_stats_ipsec_vty(vty, iface);
+	fswan_if_stats_queues_vty(vty, iface);
 	vty_out(vty, "%s", VTY_NEWLINE);
 }
 
 static int
-fswan_if_show(struct interface *iface, void *arg)
+fswan_if_vty(struct interface *iface, void *arg)
 {
 	struct vty *vty = arg;
 
@@ -376,11 +407,11 @@ DEFUN(show_interface,
 				   , argv[0], VTY_NEWLINE);
 			return CMD_WARNING;
 		}
-		fswan_if_show(iface, vty);
+		fswan_if_vty(iface, vty);
 		return CMD_SUCCESS;
 	}
 
-	fswan_if_foreach(fswan_if_show, vty);
+	fswan_if_foreach(fswan_if_vty, vty);
 	return CMD_SUCCESS;
 }
 
@@ -401,7 +432,7 @@ DEFUN(show_interface_stats_all,
 		"--------------", "--------------",
 		"--------------", "--------------",
 		"--------------", "--------------", VTY_NEWLINE);
-	fswan_if_foreach(fswan_if_stats_show_summary, vty);
+	fswan_if_foreach(fswan_if_stats_summary_vty, vty);
 	return CMD_SUCCESS;
 }
 
@@ -421,7 +452,7 @@ DEFUN(show_interface_stats,
 		return CMD_WARNING;
 	}
 
-	fswan_if_stats_show_detail(vty, iface);
+	fswan_if_stats_detail_vty(vty, iface);
 	return CMD_SUCCESS;
 }
 

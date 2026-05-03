@@ -54,6 +54,19 @@ struct ethtool_phy_stats {
 	uint64_t	rx_8192_10239;
 };
 
+/* Per-NIC IPsec packet-offload counters from ethtool -S */
+#define N_IPSEC_STATS    8
+struct ethtool_ipsec_stats {
+	uint64_t	rx_pkts;
+	uint64_t	rx_bytes;
+	uint64_t	rx_drop_pkts;
+	uint64_t	rx_drop_bytes;
+	uint64_t	tx_pkts;
+	uint64_t	tx_bytes;
+	uint64_t	tx_drop_pkts;
+	uint64_t	tx_drop_bytes;
+};
+
 /* Per-queue stats from ethtool -S (rx{N}_* / tx{N}_* counters) */
 #define N_QUEUE_RX_STATS 12
 #define N_QUEUE_TX_STATS 12
@@ -98,8 +111,10 @@ struct ethtool_cache {
 	uint32_t		nstats;		/* total driver stat count */
 	struct ethtool_stats	*stats;		/* persistent GSTATS buffer */
 	int			*phy_idx;	/* [n_phy]                    */
+	int			*ipsec_idx;	/* [N_IPSEC_STATS]            */
 	int			*q_idx;		/* [nr_queues * n_per_queue]  */
 	uint32_t		n_phy;
+	uint32_t		n_ipsec;	/* count of resolved ipsec    */
 	uint32_t		n_per_queue;	/* n_rx + n_tx per queue      */
 	uint32_t		nr_queues;
 };

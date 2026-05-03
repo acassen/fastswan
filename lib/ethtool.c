@@ -59,6 +59,14 @@ static const char * const phy_stat_names[N_PHY_STATS] = {
 	"rx_4096_to_8191_bytes_phy", "rx_8192_to_10239_bytes_phy",
 };
 
+/* same order as ethtool_ipsec_stats fields */
+static const char * const ipsec_stat_names[N_IPSEC_STATS] = {
+	"ipsec_rx_pkts", "ipsec_rx_bytes",
+	"ipsec_rx_drop_pkts", "ipsec_rx_drop_bytes",
+	"ipsec_tx_pkts", "ipsec_tx_bytes",
+	"ipsec_tx_drop_pkts", "ipsec_tx_drop_bytes",
+};
+
 /* format strings for per-queue names; queue index substituted with %d */
 static const char rxq_stat_fmt[N_QUEUE_RX_STATS][STAT_NAME_LEN] = {
 	"rx%d_packets", "rx%d_bytes",
@@ -288,6 +296,10 @@ ethtool_gstats_cache_init(struct ethtool_cache **out, const char *ifname,
 	if (!c->phy_idx)
 		goto err;
 
+	c->ipsec_idx = malloc(N_IPSEC_STATS * sizeof(int));
+	if (!c->ipsec_idx)
+		goto err;
+
 	if (nr_queues && n_per_queue) {
 		c->q_idx = malloc(nr_queues * n_per_queue * sizeof(int));
 		if (!c->q_idx)
@@ -296,6 +308,13 @@ ethtool_gstats_cache_init(struct ethtool_cache **out, const char *ifname,
 
 	for (i = 0; i < N_PHY_STATS; i++)
 		c->phy_idx[i] = gstrings_find(gstrings, phy_stat_names[i]);
+
+	c->n_ipsec = 0;
+	for (i = 0; i < N_IPSEC_STATS; i++) {
+		c->ipsec_idx[i] = gstrings_find(gstrings, ipsec_stat_names[i]);
+		if (c->ipsec_idx[i] >= 0)
+			c->n_ipsec++;
+	}
 
 	for (q = 0; q < nr_queues; q++) {
 		for (i = 0; i < N_QUEUE_RX_STATS; i++) {
@@ -319,6 +338,7 @@ ethtool_gstats_cache_init(struct ethtool_cache **out, const char *ifname,
 
 err:
 	free(c->q_idx);
+	free(c->ipsec_idx);
 	free(c->phy_idx);
 	free(c->stats);
 	free(gstrings);
@@ -343,6 +363,7 @@ ethtool_gstats_cache_destroy(struct ethtool_cache *c)
 	close(c->fd);
 	free(c->stats);
 	free(c->phy_idx);
+	free(c->ipsec_idx);
 	free(c->q_idx);
 	free(c);
 }

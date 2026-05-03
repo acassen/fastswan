@@ -30,12 +30,25 @@
 /*
  *	Interface ethtool stats collection
  */
+static void
+update_rate(struct iface_rate *r, uint64_t cur_bytes, uint64_t cur_pkts,
+	    uint64_t elapsed)
+{
+	if (elapsed) {
+		r->bw_bps = (cur_bytes - r->prev_bytes) * 1000000000ULL / elapsed;
+		r->pps = (cur_pkts - r->prev_pkts) * 1000000000ULL / elapsed;
+	}
+	r->prev_bytes = cur_bytes;
+	r->prev_pkts = cur_pkts;
+}
+
 int
 fswan_if_collect_ethtool(struct interface *iface, uint64_t now_ns)
 {
 	struct ethtool_cache *c = iface->ethtool_cache;
 	struct ethtool_phy_stats *ps = &iface->phy_stats;
-	uint64_t *d;
+	struct ethtool_ipsec_stats *is = &iface->ipsec_stats;
+	uint64_t *d, elapsed;
 	uint32_t q, nr;
 	int i;
 
@@ -55,6 +68,10 @@ fswan_if_collect_ethtool(struct interface *iface, uint64_t now_ns)
 	for (i = 0, d = (uint64_t *)ps; i < N_PHY_STATS; i++)
 		d[i] = ethtool_gstats_val(c, c->phy_idx[i]);
 
+	/* fill ipsec_stats */
+	for (i = 0, d = (uint64_t *)is; i < N_IPSEC_STATS; i++)
+		d[i] = ethtool_gstats_val(c, c->ipsec_idx[i]);
+
 	/* fill per-queue stats */
 	if (iface->queue_stats) {
 		nr = max(iface->nr_rx_queues, iface->nr_tx_queues);
@@ -66,24 +83,11 @@ fswan_if_collect_ethtool(struct interface *iface, uint64_t now_ns)
 		}
 	}
 
-	/* rate estimates from PHY counters */
-	if (iface->prev_ts_ns) {
-		uint64_t elapsed = now_ns - iface->prev_ts_ns;
-		if (elapsed) {
-			iface->rx_bw_bps = (ps->rx_bytes - iface->prev_rx_bytes)
-					   * 1000000000ULL / elapsed;
-			iface->tx_bw_bps = (ps->tx_bytes - iface->prev_tx_bytes)
-					   * 1000000000ULL / elapsed;
-			iface->rx_pps = (ps->rx_packets - iface->prev_rx_packets)
-					* 1000000000ULL / elapsed;
-			iface->tx_pps = (ps->tx_packets - iface->prev_tx_packets)
-					* 1000000000ULL / elapsed;
-		}
-	}
-	iface->prev_rx_bytes = ps->rx_bytes;
-	iface->prev_tx_bytes = ps->tx_bytes;
-	iface->prev_rx_packets = ps->rx_packets;
-	iface->prev_tx_packets = ps->tx_packets;
+	elapsed = iface->prev_ts_ns ? now_ns - iface->prev_ts_ns : 0;
+	update_rate(&iface->rx, ps->rx_bytes, ps->rx_packets, elapsed);
+	update_rate(&iface->tx, ps->tx_bytes, ps->tx_packets, elapsed);
+	update_rate(&iface->ipsec_rx, is->rx_bytes, is->rx_pkts, elapsed);
+	update_rate(&iface->ipsec_tx, is->tx_bytes, is->tx_pkts, elapsed);
 	iface->prev_ts_ns = now_ns;
 	return 0;
 }
