@@ -153,20 +153,12 @@ DEFUN(show_xdp_xfrm_offload_policy,
       show_xdp_xfrm_offload_policy_cmd,
       "show xdp xfrm offload policy",
       SHOW_STR
-      "Dump the destination prefixes currently installed in the XDP XFRM LPM map,"
-      " with their source-prefix list and per-policy flags\n")
+      "BPF/XDP fast-path mirror state with per-program clear-text counters."
+      " Use to compare against `show ipsec policy` when troubleshooting"
+      " fast-path divergence (IPv4-only, packet-offload only). Also the"
+      " source for the CLEAR line in `show ipsec`.\n")
 {
 	return xdp_xfrm_show(vty, fswan_xfrm_policy_vty, "policies");
-}
-
-DEFUN(show_xdp_xfrm_offload_policy_stats,
-      show_xdp_xfrm_offload_policy_stats_cmd,
-      "show xdp xfrm offload policy statistcs",
-      SHOW_STR
-      "Dump per-policy / per-source-prefix packet and byte counters"
-      " collected by the XDP fast path\n")
-{
-	return xdp_xfrm_show(vty, fswan_xfrm_policy_stats_vty, "policies");
 }
 
 /*
@@ -181,9 +173,7 @@ cmd_ext_fswan_install(void)
 	install_element(CONFIG_NODE, &no_disable_xdp_xfrm_stats_offload_cmd);
 	/* Install Global show commands */
 	install_element(VIEW_NODE, &show_xdp_xfrm_offload_policy_cmd);
-	install_element(VIEW_NODE, &show_xdp_xfrm_offload_policy_stats_cmd);
 	install_element(ENABLE_NODE, &show_xdp_xfrm_offload_policy_cmd);
-	install_element(ENABLE_NODE, &show_xdp_xfrm_offload_policy_stats_cmd);
 
 	return 0;
 }

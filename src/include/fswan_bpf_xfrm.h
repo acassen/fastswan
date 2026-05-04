@@ -22,6 +22,7 @@
  */
 #pragma once
 
+#include <stdbool.h>
 #include <linux/types.h>
 
 #include "vty.h"
@@ -79,6 +80,15 @@ struct hairpin_nexthop {
 
 /* Prototypes */
 int fswan_xfrm_policy_vty(struct vty *vty);
-int fswan_xfrm_policy_stats_vty(struct vty *vty);
+void fswan_bpf_xfrm_policy_counters_vty(struct vty *vty,
+					struct fswan_bpf_prog *opts,
+					struct ipv4_xfrm_policy *val);
+void fswan_bpf_xfrm_policy_counters_by_selector_vty(struct vty *vty,
+						    __be32 saddr, __u8 prefixlen_s,
+						    __be32 daddr, __u8 prefixlen_d);
+bool fswan_bpf_xfrm_policy_counters_by_selector_sum(__be32 saddr, __u8 prefixlen_s,
+						    __be32 daddr, __u8 prefixlen_d,
+						    uint64_t *pkts_out,
+						    uint64_t *bytes_out);
 int fswan_bpf_xfrm_map_load(struct fswan_bpf_prog *p);
 int fswan_bpf_xfrm_action(int, struct xfrm_policy *);

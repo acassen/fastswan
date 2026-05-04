@@ -36,6 +36,7 @@
 #include "logger.h"
 #include "bitops.h"
 #include "vty.h"
+#include "table.h"
 #include "inet_utils.h"
 #include "fswan_data.h"
 #include "fswan_if.h"
@@ -363,7 +364,7 @@ fswan_bpf_xfrm_action(int action, struct xfrm_policy *p)
 /*
  *	XFRM Policy display
  */
-static void
+void
 fswan_bpf_xfrm_policy_counters_vty(struct vty *vty, struct fswan_bpf_prog *opts,
 				   struct ipv4_xfrm_policy *val)
 {
@@ -395,7 +396,7 @@ fswan_bpf_xfrm_policy_counters_vty(struct vty *vty, struct fswan_bpf_prog *opts,
 		bytes += s[i].bytes;
 	}
 
-	vty_out(vty, "   %s:\tpkts:%ld bytes:%ld%s"
+	vty_out(vty, "            %s: pkts:%ld bytes:%ld%s"
 		   , opts->name, pkts, bytes, VTY_NEWLINE);
 end:
 	free(s);
@@ -425,56 +426,29 @@ fswan_bpf_xfrm_policy_lookup_in_prog(struct fswan_bpf_prog *opts,
 				    val_out, sizeof(*val_out), 0);
 }
 
-static void
-fswan_bpf_xfrm_policy_stats_vty(struct vty *vty, struct fswan_bpf_prog *o,
-				struct ipv4_dst_lpm_key *dk,
-				struct ipv4_policy_lpm_key *pk,
-				struct ipv4_xfrm_policy *val_o)
+/* Per-program counter print, keyed by selector. Used by the combined view
+ * for the breakdown line under each policy. */
+void
+fswan_bpf_xfrm_policy_counters_by_selector_vty(struct vty *vty,
+					       __be32 saddr, __u8 prefixlen_s,
+					       __be32 daddr, __u8 prefixlen_d)
 {
-	struct list_head *l = &daemon_data->bpf_progs;
-	struct fswan_bpf_prog *opts;
+	struct ipv4_dst_lpm_key dk = {
+		.prefixlen	= prefixlen_d,
+		.dst		= daddr,
+	};
+	struct ipv4_policy_lpm_key pk = {
+		.prefixlen	= 32 + prefixlen_s,
+		.src		= saddr,
+	};
 	struct ipv4_xfrm_policy val;
+	struct fswan_bpf_prog *opts;
 
-	if (__test_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT, &daemon_data->flags))
-		return;
-
-	list_for_each_entry(opts, l, next) {
-		if (opts == o) {
-			fswan_bpf_xfrm_policy_counters_vty(vty, opts, val_o);
+	list_for_each_entry(opts, &daemon_data->bpf_progs, next) {
+		if (fswan_bpf_xfrm_policy_lookup_in_prog(opts, &dk, &pk, &val))
 			continue;
-		}
-
-		if (fswan_bpf_xfrm_policy_lookup_in_prog(opts, dk, pk, &val))
-			continue;
-
 		fswan_bpf_xfrm_policy_counters_vty(vty, opts, &val);
 	}
-}
-
-static void
-fswan_bpf_xfrm_policy_pfx_vty(struct vty *vty, struct fswan_bpf_prog *opts,
-			      struct ipv4_dst_lpm_key *dk,
-			      struct ipv4_policy_lpm_key *pk,
-			      struct ipv4_xfrm_policy *val, bool stats)
-{
-	uint32_t src_bits = pk->prefixlen >= 32 ? pk->prefixlen - 32 : 0;
-	char ifname[IF_NAMESIZE];
-
-	if (!src_bits) {
-		vty_out(vty, " dst %u.%u.%u.%u/%u dir %s dev %s%s"
-			   , NIPQUAD(dk->dst), dk->prefixlen
-			   , (val->flags & XFRM_POLICY_FL_INGRESS) ? "in" : "out"
-			   , if_indextoname(val->ifindex, ifname), VTY_NEWLINE);
-	} else {
-		vty_out(vty, " src %u.%u.%u.%u/%u dst %u.%u.%u.%u/%u dir %s dev %s%s"
-			   , NIPQUAD(pk->src), src_bits
-			   , NIPQUAD(dk->dst), dk->prefixlen
-			   , (val->flags & XFRM_POLICY_FL_INGRESS) ? "in" : "out"
-			   , if_indextoname(val->ifindex, ifname), VTY_NEWLINE);
-	}
-
-	if (stats)
-		fswan_bpf_xfrm_policy_stats_vty(vty, opts, dk, pk, val);
 }
 
 /*
@@ -501,18 +475,93 @@ fswan_bpf_xfrm_dst_table_build(struct fswan_bpf_prog *opts,
 	return 0;
 }
 
+/* Per-CPU counter sum for one policy slot. */
 static int
-fswan_bpf_xfrm_policy_vty(struct vty *vty, bool stats)
+fswan_bpf_xfrm_policy_get_counters(struct fswan_bpf_prog *opts, uint32_t slot,
+				   uint64_t *pkts_out, uint64_t *bytes_out)
 {
-	struct ipv4_policy_lpm_key key = { 0 }, next_key;
-	struct ipv4_dst_lpm_key *dst_table;
+	struct bpf_map *map = opts->bpf_maps[FSWAN_BPF_MAP_POLICY_STATS_ARRAY].map;
+	unsigned int nr_cpus = libbpf_num_possible_cpus();
+	struct xfrm_policy_stats *s;
+	uint64_t pkts = 0, bytes = 0;
+	unsigned int i;
+	int err;
+
+	*pkts_out = *bytes_out = 0;
+	if (!slot || slot >= XFRM_POLICY_MAX)
+		return -1;
+
+	s = calloc(nr_cpus, sizeof(*s));
+	if (!s)
+		return -1;
+
+	err = bpf_map__lookup_elem(map, &slot, sizeof(slot),
+				   s, nr_cpus * sizeof(*s), 0);
+	if (err) {
+		free(s);
+		return -1;
+	}
+
+	for (i = 0; i < nr_cpus; i++) {
+		pkts += s[i].pkts;
+		bytes += s[i].bytes;
+	}
+
+	free(s);
+	*pkts_out = pkts;
+	*bytes_out = bytes;
+	return 0;
+}
+
+/* Counter sum across every program. Returns true when the policy is in
+ * any program's LPM map. */
+bool
+fswan_bpf_xfrm_policy_counters_by_selector_sum(__be32 saddr, __u8 prefixlen_s,
+					       __be32 daddr, __u8 prefixlen_d,
+					       uint64_t *pkts_out,
+					       uint64_t *bytes_out)
+{
+	struct ipv4_dst_lpm_key dk = {
+		.prefixlen	= prefixlen_d,
+		.dst		= daddr,
+	};
+	struct ipv4_policy_lpm_key pk = {
+		.prefixlen	= 32 + prefixlen_s,
+		.src		= saddr,
+	};
 	struct ipv4_xfrm_policy val;
 	struct fswan_bpf_prog *opts;
-	struct bpf_map *map;
+	uint64_t pkts = 0, bytes = 0;
+	bool found = false;
 
-	/* rules are mirred into every eBPF progs, first one is good enough */
-	opts = list_first_entry(&daemon_data->bpf_progs, struct fswan_bpf_prog, next);
-	map = opts->bpf_maps[FSWAN_BPF_MAP_POLICY_LPM].map;
+	list_for_each_entry(opts, &daemon_data->bpf_progs, next) {
+		uint64_t p, b;
+
+		if (fswan_bpf_xfrm_policy_lookup_in_prog(opts, &dk, &pk, &val))
+			continue;
+		found = true;
+		if (fswan_bpf_xfrm_policy_get_counters(opts, val.stats_slot, &p, &b))
+			continue;
+		pkts += p;
+		bytes += b;
+	}
+
+	*pkts_out = pkts;
+	*bytes_out = bytes;
+	return found;
+}
+
+/* Render every (policy × loaded program) combination as one table row. */
+static int
+fswan_bpf_xfrm_policy_table_emit(struct vty *vty, struct fswan_bpf_prog *opts,
+				 struct table *tbl, bool stats_disabled)
+{
+	struct bpf_map *map = opts->bpf_maps[FSWAN_BPF_MAP_POLICY_LPM].map;
+	struct ipv4_policy_lpm_key key = { 0 }, next_key;
+	struct ipv4_xfrm_policy val;
+	struct ipv4_dst_lpm_key *dst_table;
+	char ifname[IF_NAMESIZE];
+	char src[32], dst[32], pkts[24], bytes[24];
 
 	dst_table = calloc(FSWAN_BPF_DST_ID_MAX, sizeof(*dst_table));
 	if (!dst_table) {
@@ -522,6 +571,11 @@ fswan_bpf_xfrm_policy_vty(struct vty *vty, bool stats)
 	fswan_bpf_xfrm_dst_table_build(opts, dst_table);
 
 	while (bpf_map__get_next_key(map, &key, &next_key, sizeof(key)) == 0) {
+		struct ipv4_dst_lpm_key *dk;
+		uint32_t src_bits;
+		uint64_t p = 0, b = 0;
+		const char *dev;
+
 		key = next_key;
 		if (bpf_map__lookup_elem(map, &key, sizeof(key),
 					 &val, sizeof(val), 0))
@@ -529,8 +583,31 @@ fswan_bpf_xfrm_policy_vty(struct vty *vty, bool stats)
 		if (key.dst_id >= FSWAN_BPF_DST_ID_MAX)
 			continue;
 
-		fswan_bpf_xfrm_policy_pfx_vty(vty, opts, &dst_table[key.dst_id],
-					      &key, &val, stats);
+		dk = &dst_table[key.dst_id];
+		src_bits = key.prefixlen >= 32 ? key.prefixlen - 32 : 0;
+
+		if (src_bits)
+			snprintf(src, sizeof(src), "%u.%u.%u.%u/%u",
+				 NIPQUAD(key.src), src_bits);
+		else
+			snprintf(src, sizeof(src), "0.0.0.0/0");
+		snprintf(dst, sizeof(dst), "%u.%u.%u.%u/%u",
+			 NIPQUAD(dk->dst), dk->prefixlen);
+
+		dev = if_indextoname(val.ifindex, ifname);
+		if (!dev)
+			dev = "?";
+
+		if (!stats_disabled)
+			fswan_bpf_xfrm_policy_get_counters(opts, val.stats_slot,
+							   &p, &b);
+
+		snprintf(pkts, sizeof(pkts), "%lu", (unsigned long) p);
+		snprintf(bytes, sizeof(bytes), "%lu", (unsigned long) b);
+
+		table_add_row(tbl, src, dst,
+			      (val.flags & XFRM_POLICY_FL_INGRESS) ? "in" : "out",
+			      dev, opts->name, pkts, bytes);
 	}
 
 	free(dst_table);
@@ -540,11 +617,32 @@ fswan_bpf_xfrm_policy_vty(struct vty *vty, bool stats)
 int
 fswan_xfrm_policy_vty(struct vty *vty)
 {
-	return fswan_bpf_xfrm_policy_vty(vty, false);
-}
+	bool stats_disabled = __test_bit(FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT,
+					 &daemon_data->flags);
+	struct fswan_bpf_prog *opts;
+	struct table *tbl;
 
-int
-fswan_xfrm_policy_stats_vty(struct vty *vty)
-{
-	return fswan_bpf_xfrm_policy_vty(vty, true);
+	tbl = table_init(7, STYLE_BOLD_TITLE_LIGHT);
+	if (!tbl) {
+		vty_out(vty, "%% Cant allocate table%s", VTY_NEWLINE);
+		return -1;
+	}
+	table_set_column(tbl, "SRC", "DST", "DIR", "DEV", "PROG", "PKTS", "BYTES");
+	table_set_header_align(tbl, ALIGN_CENTER, ALIGN_CENTER, ALIGN_CENTER,
+				    ALIGN_CENTER, ALIGN_CENTER, ALIGN_CENTER,
+				    ALIGN_CENTER);
+	table_set_column_align(tbl, ALIGN_LEFT, ALIGN_LEFT, ALIGN_CENTER,
+				    ALIGN_CENTER, ALIGN_CENTER, ALIGN_RIGHT,
+				    ALIGN_RIGHT);
+
+	list_for_each_entry(opts, &daemon_data->bpf_progs, next) {
+		if (fswan_bpf_xfrm_policy_table_emit(vty, opts, tbl, stats_disabled) < 0) {
+			table_destroy(tbl);
+			return -1;
+		}
+	}
+
+	table_vty_out(tbl, vty);
+	table_destroy(tbl);
+	return 0;
 }
