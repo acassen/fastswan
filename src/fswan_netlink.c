@@ -38,18 +38,15 @@
 /* local includes */
 #include "memory.h"
 #include "logger.h"
-#include "bitops.h"
 #include "utils.h"
 #include "thread.h"
 #include "inet_utils.h"
 #include "fswan_data.h"
 #include "fswan_if.h"
 #include "fswan_netlink.h"
-#include "fswan_bpf_xfrm.h"
 #include "fswan_hairpin.h"
 
 /* Local data */
-static struct nl_handle nl_kernel = { .fd = -1 };	/* XFRM reflection channel */
 static struct nl_handle nl_kernel_route = { .fd = -1 };	/* RTNLGRP_NEIGH reflection */
 static struct nl_handle nl_cmd = { .fd = -1 };		/* Kernel command channel */
 
@@ -57,40 +54,11 @@ static struct nl_handle nl_cmd = { .fd = -1 };		/* Kernel command channel */
 extern struct data *daemon_data;
 extern struct thread_master *master;
 
-/* Ok this is a nasty hack but PACKET OFFLOAD is not part of all distros.
- * otherwise need to maintain a uapi copy like iproute2 does */
-#ifndef XFRM_OFFLOAD_PACKET
-#define XFRM_OFFLOAD_PACKET	4
-#endif
-
 /* NDA_RTA is not exported by all distros' linux/neighbour.h. */
 #ifndef NDA_RTA
 #define NDA_RTA(r) \
 	((struct rtattr *)(((char *)(r)) + NLMSG_ALIGN(sizeof(struct ndmsg))))
 #endif
-
-static const char *
-get_nl_msg_type(unsigned type)
-{
-	switch (type) {
-		switch_define_str(XFRM_MSG_NEWSA);
-		switch_define_str(XFRM_MSG_DELSA);
-		switch_define_str(XFRM_MSG_UPDSA);
-		switch_define_str(XFRM_MSG_EXPIRE);
-		switch_define_str(XFRM_MSG_NEWPOLICY);
-		switch_define_str(XFRM_MSG_DELPOLICY);
-		switch_define_str(XFRM_MSG_UPDPOLICY);
-		switch_define_str(XFRM_MSG_POLEXPIRE);
-		switch_define_str(XFRM_MSG_ACQUIRE);
-		switch_define_str(XFRM_MSG_FLUSHSA);
-		switch_define_str(XFRM_MSG_FLUSHPOLICY);
-		switch_define_str(XFRM_MSG_REPORT);
-		switch_define_str(XFRM_MSG_NEWAE);
-		switch_define_str(XFRM_MSG_MAPPING);
-	};
-
-	return "";
-}
 
 
 /* iproute2 utility function */
@@ -114,7 +82,7 @@ addattr_l(struct nlmsghdr *n, size_t maxlen, unsigned short type, const void *da
 	return 0;
 }
 
-static void
+void
 parse_rtattr(struct rtattr **tb, int max, struct rtattr *rta, size_t len)
 {
 	memset(tb, 0, sizeof(struct rtattr *) * (max + 1));
@@ -131,7 +99,7 @@ parse_rtattr(struct rtattr **tb, int max, struct rtattr *rta, size_t len)
 }
 
 /* Parse Netlink message */
-static int
+int
 netlink_parse_info(int (*filter)(struct sockaddr_nl *, struct nlmsghdr *, void *),
 		   struct nl_handle *nl, void *userdata, bool read_all)
 {
@@ -187,12 +155,12 @@ netlink_parse_info(int (*filter)(struct sockaddr_nl *, struct nlmsghdr *, void *
 			if (check_EAGAIN(errno))
 				break;
 			if (errno == ENOBUFS) {
-				log_message(LOG_INFO, "Netlink: Receive buffer overrun on %s socket - (%m)"
-						    , nl == &nl_kernel ? "monitor" : "cmd");
+				log_message(LOG_INFO, "Netlink: Receive buffer overrun on fd %d - (%m)"
+						    , nl->fd);
 				log_message(LOG_INFO, "  - increase the relevant netlink_rcv_bufs global parameter and/or set force");
 			} else
-				log_message(LOG_INFO, "Netlink: recvmsg error on %s socket - %d (%m)"
-						    , nl == &nl_kernel ? "monitor" : "cmd", errno);
+				log_message(LOG_INFO, "Netlink: recvmsg error on fd %d - %d (%m)"
+						    , nl->fd, errno);
 			continue;
 		}
 
@@ -239,9 +207,8 @@ netlink_parse_info(int (*filter)(struct sockaddr_nl *, struct nlmsghdr *, void *
 					return -1;
 				}
 
-				log_message(LOG_INFO, "Netlink: error: %s(%d), type=%s(%u), seq=%u, pid=%u"
+				log_message(LOG_INFO, "Netlink: error: %s(%d), type=%u, seq=%u, pid=%u"
 						    , strerror(-err->error), -err->error
-						    , get_nl_msg_type(err->msg.nlmsg_type)
 						    , err->msg.nlmsg_type, err->msg.nlmsg_seq
 						    , err->msg.nlmsg_pid);
 				FREE(nlmsg_buf);
@@ -279,7 +246,7 @@ netlink_parse_info(int (*filter)(struct sockaddr_nl *, struct nlmsghdr *, void *
 
 
 /* Open Netlink channel with kernel */
-static int
+int
 netlink_open(struct nl_handle *nl, unsigned rcvbuf_size, int flags, int protocol, unsigned group, ...)
 {
 	socklen_t addr_len;
@@ -345,7 +312,7 @@ netlink_open(struct nl_handle *nl, unsigned rcvbuf_size, int flags, int protocol
 }
 
 /* Close Netlink channel with kernel */
-static void
+void
 netlink_close(struct nl_handle *nl)
 {
 	if (!nl)
@@ -360,188 +327,6 @@ netlink_close(struct nl_handle *nl)
 		close(nl->fd);
 
 	nl->fd = -1;
-}
-
-
-/*
- *	Kernel Netlink reflector
- */
-
-/* This one is mostly coming from iproute2 code */
-static int
-xfrm_policy_filter(struct nlmsghdr *n)
-{
-	struct rtattr *tb[XFRMA_MAX+1];
-	struct rtattr *rta;
-	struct xfrm_userpolicy_info *xpinfo = NULL;
-	struct xfrm_user_polexpire *xpexp = NULL;
-	struct xfrm_userpolicy_id *xpid = NULL;
-	struct xfrm_selector *sel;
-	struct xfrm_user_offload *xuo;
-	struct xfrm_policy policy;
-	int len = n->nlmsg_len;
-
-	if (n->nlmsg_type == XFRM_MSG_DELPOLICY)  {
-		xpid = NLMSG_DATA(n);
-		len -= NLMSG_SPACE(sizeof(*xpid));
-	} else if (n->nlmsg_type == XFRM_MSG_POLEXPIRE) {
-		xpexp = NLMSG_DATA(n);
-		xpinfo = &xpexp->pol;
-		len -= NLMSG_SPACE(sizeof(*xpexp));
-	} else {
-		xpexp = NULL;
-		xpinfo = NLMSG_DATA(n);
-		len -= NLMSG_SPACE(sizeof(*xpinfo));
-	}
-
-	if (len < 0) {
-		log_message(LOG_INFO, "%s(): BUG: wrong nlmsg len %d"
-				    , __FUNCTION__, len);
-		return -1;
-	}
-
-	if (n->nlmsg_type == XFRM_MSG_DELPOLICY)
-		rta = XFRMPID_RTA(xpid);
-	else if (n->nlmsg_type == XFRM_MSG_POLEXPIRE)
-		rta = XFRMPEXP_RTA(xpexp);
-	else
-		rta = XFRMP_RTA(xpinfo);
-
-	parse_rtattr(tb, XFRMA_MAX, rta, len);
-
-	if (n->nlmsg_type == XFRM_MSG_DELPOLICY) {
-		if (!tb[XFRMA_POLICY]) {
-			log_message(LOG_INFO, "%s(): Buggy XFRM_MSG_DELPOLICY: no XFRMA_POLICY"
-					    , __FUNCTION__);
-			return -1;
-		}
-		if (RTA_PAYLOAD(tb[XFRMA_POLICY]) < sizeof(*xpinfo)) {
-			log_message(LOG_INFO, "%s(): Buggy XFRM_MSG_DELPOLICY: too short XFRMA_POLICY len"
-					    , __FUNCTION__);
-			return -1;
-		}
-		xpinfo = RTA_DATA(tb[XFRMA_POLICY]);
-	}
-
-	/* Skip socket related policy */
-	if (xpinfo->dir >= XFRM_POLICY_MAX)
-		return 0;
-
-	/* Only take into account IN & OUT */
-	if (!(xpinfo->dir == XFRM_POLICY_IN || xpinfo->dir == XFRM_POLICY_OUT))
-		return 0;
-
-	/* Only offload is considered */
-	if (!tb[XFRMA_OFFLOAD_DEV])
-		return 0;
-
-	if (RTA_PAYLOAD(tb[XFRMA_OFFLOAD_DEV]) < sizeof(*xuo)) {
-		log_message(LOG_INFO, "%s(): Truncated xfrm Offload info"
-				    , __FUNCTION__);
-		return -1;
-	}
-
-	xuo = (struct xfrm_user_offload *) RTA_DATA(tb[XFRMA_OFFLOAD_DEV]);
-
-	/* Only Packet offload is supported */
-	if (!(xuo->flags & XFRM_OFFLOAD_PACKET))
-		return 0;
-
-	/* Skip protocol specific policy */
-	sel = &xpinfo->sel;
-	if (sel->proto)
-		return 0;
-
-	/* Cherry pick */
-	memset(&policy, 0, sizeof(struct xfrm_policy));
-	policy.family = sel->family;
-	policy.daddr = sel->daddr;
-	policy.saddr = sel->saddr;
-	policy.prefixlen_d = sel->prefixlen_d;
-	policy.prefixlen_s = sel->prefixlen_s;
-	policy.ifindex = xuo->ifindex;
-	__set_bit((xpinfo->dir == XFRM_POLICY_IN) ? XFRM_POLICY_FL_IN_BIT : XFRM_POLICY_FL_OUT_BIT
-		  , &policy.flags);
-
-	return fswan_bpf_xfrm_action(n->nlmsg_type, &policy);
-}
-
-static int
-netlink_xfrm_filter(__attribute__((unused)) struct sockaddr_nl *snl,
-		    struct nlmsghdr *h,
-		    __attribute__((unused)) void *userdata)
-{
-	switch (h->nlmsg_type) {
-	case XFRM_MSG_NEWPOLICY:
-	case XFRM_MSG_DELPOLICY:
-	case XFRM_MSG_UPDPOLICY:
-	case XFRM_MSG_POLEXPIRE:
-		return xfrm_policy_filter(h);
-	default:
-		log_message(LOG_INFO, "Kernel is reflecting an unknown netlink nlmsg_type: %d"
-				    , h->nlmsg_type);
-	}
-	return 0;
-}
-
-
-/*
- *	Kernel Netlink reflector
- */
-static void
-kernel_netlink(struct thread * thread)
-{
-	struct nl_handle *nl = THREAD_ARG(thread);
-
-	if (thread->type != THREAD_READ_TIMEOUT)
-		netlink_parse_info(netlink_xfrm_filter, nl, NULL, true);
-
-	nl->thread = thread_add_read(master, kernel_netlink, nl, nl->fd, TIMER_NEVER, 0);
-}
-
-
-/*
- *	Netlink XFRM lookup
- */
-static int
-netlink_xfrm_request(struct nl_handle *nl, uint16_t type)
-{
-	struct sockaddr_nl snl = { .nl_family = AF_NETLINK };
-	struct nlmsghdr nlh = {
-		.nlmsg_len = NLMSG_HDRLEN,
-		.nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST,
-		.nlmsg_type = type,
-		.nlmsg_seq = ++nl->seq,
-	};
-
-	if (sendto(nl->fd, &nlh, sizeof(nlh), 0,
-		   (struct sockaddr *) &snl, sizeof(snl)) < 0) {
-		log_message(LOG_INFO, "Netlink: sendto() failed: %m");
-		return -1;
-	}
-
-	return 0;
-}
-
-int
-netlink_xfrm_lookup(void)
-{
-	struct nl_handle nl = { .fd = -1 };
-	int err = 0;
-
-	err = netlink_open(&nl, daemon_data->nl_rcvbuf_size, SOCK_NONBLOCK,
-			   NETLINK_XFRM, 0, 0);
-	if (err) {
-		log_message(LOG_INFO, "Error while creating Kernel netlink xfrm channel");
-		return -1;
-	}
-
-	if (netlink_xfrm_request(&nl, XFRM_MSG_GETPOLICY) < 0 ||
-	    netlink_parse_info(netlink_xfrm_filter, &nl, NULL, false) < 0)
-		err = -1;
-
-	netlink_close(&nl);
-	return err;
 }
 
 
@@ -903,11 +688,7 @@ fswan_netlink_init(void)
 		return -1;
 	}
 
-	/* Register Kernel netlink reflector */
-	err = netlink_open(&nl_kernel, daemon_data->nl_rcvbuf_size, SOCK_NONBLOCK
-				     , NETLINK_XFRM, XFRMNLGRP_POLICY, 0);
-	if (err) {
-		log_message(LOG_INFO, "Error while registering Kernel netlink reflector channel");
+	if (fswan_netlink_xfrm_init() < 0) {
 		netlink_close(&nl_cmd);
 		return -1;
 	}
@@ -918,14 +699,12 @@ fswan_netlink_init(void)
 				            RTNLGRP_IPV4_ROUTE, 0);
 	if (err) {
 		log_message(LOG_INFO, "Error while registering Kernel netlink route reflector");
-		netlink_close(&nl_kernel);
+		fswan_netlink_xfrm_destroy();
 		netlink_close(&nl_cmd);
 		return -1;
 	}
 
 	log_message(LOG_INFO, "Registering Kernel netlink reflectors");
-	nl_kernel.thread = thread_add_read(master, kernel_netlink, &nl_kernel,
-					   nl_kernel.fd, TIMER_NEVER, 0);
 	nl_kernel_route.thread = thread_add_read(master, kernel_netlink_route,
 						 &nl_kernel_route,
 						 nl_kernel_route.fd,
@@ -938,7 +717,7 @@ fswan_netlink_destroy(void)
 {
 	log_message(LOG_INFO, "Unregistering Kernel netlink reflectors");
 	netlink_close(&nl_kernel_route);
-	netlink_close(&nl_kernel);
+	fswan_netlink_xfrm_destroy();
 	netlink_close(&nl_cmd);
 	return 0;
 }
