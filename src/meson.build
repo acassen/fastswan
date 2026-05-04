@@ -42,6 +42,7 @@ src += files(
   'fswan_netlink_xfrm.c',
   'fswan_vty.c',
   'fswan_vty_shell.c',
+  'fswan_xfrm_vty.c',
   'main.c',
 )
 
