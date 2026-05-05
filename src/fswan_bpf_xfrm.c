@@ -67,8 +67,59 @@ fswan_bpf_xfrm_map_load(struct fswan_bpf_prog *p)
 	err = err ? : fswan_bpf_map_load(p, "policy_lpm", FSWAN_BPF_MAP_POLICY_LPM);
 	err = err ? : fswan_bpf_map_load(p, "xfrm_policy_stats_array", FSWAN_BPF_MAP_POLICY_STATS_ARRAY);
 	err = err ? : fswan_bpf_map_load(p, "hairpin_map", FSWAN_BPF_MAP_HAIRPIN);
+	err = err ? : fswan_bpf_map_load(p, "iface_topo", FSWAN_BPF_MAP_IFACE_TOPO);
 
 	return err;
+}
+
+
+/*
+ * 	System interface topology mirroring
+ */
+static int
+fswan_bpf_iface_topo_write(struct fswan_bpf_prog *p, struct interface *iface)
+{
+	struct iface_topo val = {};
+	struct bpf_map *map;
+	uint32_t key = iface->ifindex;
+
+	if (!p || !p->bpf_maps)
+		return 0;
+	if (__test_bit(FSWAN_BPF_PROG_FL_SHUTDOWN_BIT, &p->flags))
+		return 0;
+	map = p->bpf_maps[FSWAN_BPF_MAP_IFACE_TOPO].map;
+	if (!map)
+		return 0;
+	if (key >= IFACE_TOPO_MAP_MAX_ENTRIES) {
+		log_message(LOG_INFO, "%s(): ifindex %u out of iface_topo map range"
+				    , __FUNCTION__, key);
+		return -1;
+	}
+
+	if (iface->vlan_id && iface->link_iface) {
+		val.vlan_id      = iface->vlan_id;
+		val.link_ifindex = iface->link_iface->ifindex;
+	}
+	return bpf_map__update_elem(map, &key, sizeof(key),
+				    &val, sizeof(val), 0);
+}
+
+void
+fswan_bpf_iface_topo_publish(struct interface *iface)
+{
+	struct fswan_bpf_prog *p;
+
+	list_for_each_entry(p, &daemon_data->bpf_progs, next)
+		fswan_bpf_iface_topo_write(p, iface);
+}
+
+void
+fswan_bpf_iface_topo_seed(struct fswan_bpf_prog *p)
+{
+	struct interface *iface;
+
+	list_for_each_entry(iface, &daemon_data->interfaces, next)
+		fswan_bpf_iface_topo_write(p, iface);
 }
 
 

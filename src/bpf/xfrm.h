@@ -85,5 +85,13 @@ struct hairpin_nexthop {
 	__u8	_pad[HAIRPIN_CACHELINE - 1 - HAIRPIN_REFORMAT_MAX];
 } __attribute__ ((aligned(HAIRPIN_CACHELINE)));
 
+/* System-wide interface topology mirror, keyed by ifindex */
+#define IFACE_TOPO_MAP_MAX_ENTRIES	1024
+
+struct iface_topo {
+	__u32	link_ifindex;
+	__u16	vlan_id;
+};
+
 
 #endif

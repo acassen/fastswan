@@ -71,6 +71,13 @@ struct {
 	__type(value, struct hairpin_nexthop);
 } hairpin_map SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, IFACE_TOPO_MAP_MAX_ENTRIES);
+	__type(key, __u32);
+	__type(value, struct iface_topo);
+} iface_topo SEC(".maps");
+
 
 /*
  *	IP header related update
@@ -106,14 +113,69 @@ xfrm_stats_update(struct xdp_md *ctx, struct ipv4_xfrm_policy *p)
 }
 
 /*
+ *	FIB xmit
+ */
+static __always_inline int
+xfrm_fib_xmit(struct xdp_md *ctx, struct bpf_fib_lookup *fib)
+{
+	void *data, *data_end;
+	struct ethhdr *ethh;
+
+	data     = (void *) (long) ctx->data;
+	data_end = (void *) (long) ctx->data_end;
+	ethh     = data;
+	if ((void *) (ethh + 1) > data_end)
+		return XDP_DROP;
+	__builtin_memcpy(ethh->h_dest, fib->dmac, ETH_ALEN);
+	__builtin_memcpy(ethh->h_source, fib->smac, ETH_ALEN);
+
+	if (ctx->ingress_ifindex == fib->ifindex)
+		return XDP_TX;
+	return bpf_redirect(fib->ifindex, 0);
+}
+
+/*
+ *	VLAN xmit
+ */
+static __always_inline int
+xfrm_fib_xmit_vlan(struct xdp_md *ctx, struct bpf_fib_lookup *fib,
+		   struct iface_topo *t)
+{
+	const int vlan_sz = (int) sizeof(struct _vlan_hdr);
+	struct _vlan_hdr *vlan;
+	void *data, *data_end;
+	struct ethhdr *eth;
+
+	if (bpf_xdp_adjust_head(ctx, -vlan_sz))
+		return XDP_DROP;
+
+	data     = (void *) (long) ctx->data;
+	data_end = (void *) (long) ctx->data_end;
+	if (data + ETH_HLEN + vlan_sz > data_end)
+		return XDP_DROP;
+
+	eth = data;
+	vlan = (void *) (eth + 1);
+	__builtin_memcpy(eth->h_dest, fib->dmac, ETH_ALEN);
+	__builtin_memcpy(eth->h_source, fib->smac, ETH_ALEN);
+	eth->h_proto = bpf_htons(ETH_P_8021Q);
+	vlan->hvlan_TCI = bpf_htons(t->vlan_id & 0x0fff);
+	/* vlan->h_vlan_encapsulated_proto already holds the original ethertype */
+
+	if (ctx->ingress_ifindex == t->link_ifindex)
+		return XDP_TX;
+	return bpf_redirect(t->link_ifindex, 0);
+}
+
+/*
  *	FIB lookup
  */
 static __always_inline int
 xfrm_fib_lookup(struct xdp_md *ctx, struct iphdr *iph, struct ipv4_xfrm_policy *p)
 {
 	struct bpf_fib_lookup fib_params;
-	void *data, *data_end;
-	struct ethhdr *ethh;
+	struct iface_topo *t = NULL;
+	__u32 idx;
 	int ret;
 
 	__builtin_memset(&fib_params, 0, sizeof(fib_params));
@@ -131,23 +193,16 @@ xfrm_fib_lookup(struct xdp_md *ctx, struct iphdr *iph, struct ipv4_xfrm_policy *
 	if (ret != BPF_FIB_LKUP_RET_SUCCESS)
 		return XDP_PASS;
 
-	/* Ethernet playground */
-	data     = (void *) (long) ctx->data;
-	data_end = (void *) (long) ctx->data_end;
-	ethh     = data;
-	if ((void *) (ethh + 1) > data_end)
-		return XDP_PASS;
-	__builtin_memcpy(ethh->h_dest, fib_params.dmac, ETH_ALEN);
-	__builtin_memcpy(ethh->h_source, fib_params.smac, ETH_ALEN);
-
-	/* IPv4 Header TTL playground */
+	/* TTL + stats while iph is still bounds-valid */
 	ip_decrease_ttl(iph);
 	xfrm_stats_update(ctx, p);
 
-	if (ctx->ingress_ifindex == fib_params.ifindex)
-		return XDP_TX;
-
-	return bpf_redirect(fib_params.ifindex, 0);
+	idx = fib_params.ifindex;
+	if (idx < IFACE_TOPO_MAP_MAX_ENTRIES)
+		t = bpf_map_lookup_elem(&iface_topo, &idx);
+	if (t && t->vlan_id)
+		return xfrm_fib_xmit_vlan(ctx, &fib_params, t);
+	return xfrm_fib_xmit(ctx, &fib_params);
 }
 
 /*

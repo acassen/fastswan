@@ -29,12 +29,15 @@
 #include "fswan_bpf_prog.h"
 #include "fswan_netlink.h"
 
+struct interface;
+
 /* MAP Entries*/
 enum {
 	FSWAN_BPF_MAP_DST_LPM = 0,
 	FSWAN_BPF_MAP_POLICY_LPM,
 	FSWAN_BPF_MAP_POLICY_STATS_ARRAY,
 	FSWAN_BPF_MAP_HAIRPIN,
+	FSWAN_BPF_MAP_IFACE_TOPO,
 	FSWAN_BPF_MAP_CNT
 };
 
@@ -77,6 +80,14 @@ struct hairpin_nexthop {
 	__u8	_pad[HAIRPIN_CACHELINE - 1 - HAIRPIN_REFORMAT_MAX];
 } __attribute__ ((aligned(HAIRPIN_CACHELINE)));
 
+/* System interface topology (mirror of struct in src/bpf/xfrm.h) */
+#define IFACE_TOPO_MAP_MAX_ENTRIES	1024
+
+struct iface_topo {
+	__u32	link_ifindex;
+	__u16	vlan_id;
+};
+
 
 /* Prototypes */
 int fswan_xfrm_policy_vty(struct vty *vty);
@@ -92,3 +103,5 @@ bool fswan_bpf_xfrm_policy_counters_by_selector_sum(__be32 saddr, __u8 prefixlen
 						    uint64_t *bytes_out);
 int fswan_bpf_xfrm_map_load(struct fswan_bpf_prog *p);
 int fswan_bpf_xfrm_action(int, struct xfrm_policy *);
+void fswan_bpf_iface_topo_publish(struct interface *iface);
+void fswan_bpf_iface_topo_seed(struct fswan_bpf_prog *p);
