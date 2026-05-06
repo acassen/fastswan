@@ -69,6 +69,12 @@ struct sa_scan_ctx {
 struct sa_detail_ctx {
 	struct vty	*vty;
 	bool		show_keys;
+	bool		has_spi;
+	__be32		spi;		/* network byte order */
+	int		family;		/* 0 = no addr filter */
+	bool		has_pair;
+	xfrm_address_t	addr1;		/* src */
+	xfrm_address_t	addr2;		/* dst */
 };
 
 struct policy_scan_ctx {
@@ -338,24 +344,6 @@ DEFUN(show_ipsec_sa_peer4,
 	return do_show_ipsec_sa_scan(vty, &ctx);
 }
 
-DEFUN(show_ipsec_sa_pair4,
-      show_ipsec_sa_pair4_cmd,
-      "show ipsec sa A.B.C.D A.B.C.D",
-      SHOW_STR
-      "IPsec\n"
-      "Security Associations (kernel ground truth, packet-offload only)\n"
-      "Source IPv4\n"
-      "Destination IPv4\n")
-{
-	struct sa_scan_ctx ctx = { .family = AF_INET, .has_pair = true };
-
-	if (sa_filter_parse_addr(vty, AF_INET, argv[0], &ctx.addr1) ||
-	    sa_filter_parse_addr(vty, AF_INET, argv[1], &ctx.addr2))
-		return CMD_WARNING;
-
-	return do_show_ipsec_sa_scan(vty, &ctx);
-}
-
 DEFUN(show_ipsec_sa_peer6,
       show_ipsec_sa_peer6_cmd,
       "show ipsec sa X:X::X:X",
@@ -389,24 +377,6 @@ DEFUN(show_ipsec_sa_pair6,
 
 	return do_show_ipsec_sa_scan(vty, &ctx);
 }
-
-DEFUN(show_ipsec_sa_spi,
-      show_ipsec_sa_spi_cmd,
-      "show ipsec sa spi WORD",
-      SHOW_STR
-      "IPsec\n"
-      "Security Associations (kernel ground truth, packet-offload only)\n"
-      "Filter by SPI\n"
-      "SPI (0xHEX, hex, or decimal)\n")
-{
-	struct sa_scan_ctx ctx = { .has_spi = true };
-
-	if (sa_filter_parse_spi(vty, argv[0], &ctx.spi))
-		return CMD_WARNING;
-
-	return do_show_ipsec_sa_scan(vty, &ctx);
-}
-
 
 /*
  *	show ipsec sa detail [keys]  -  iproute2-style multi-line
@@ -484,6 +454,15 @@ sa_detail_cb(struct xfrm_sa *sa, void *ctx)
 	char src[INET6_ADDRSTRLEN], dst[INET6_ADDRSTRLEN];
 	char dev[IF_NAMESIZE], flagstr[64], lastused[32];
 
+	if (c->has_spi && sa->spi != c->spi)
+		return 0;
+
+	if (c->has_pair &&
+	    (sa->family != c->family ||
+	     memcmp(&sa->saddr, &c->addr1, sizeof(xfrm_address_t)) ||
+	     memcmp(&sa->daddr, &c->addr2, sizeof(xfrm_address_t))))
+		return 0;
+
 	xfrm_addr_str(&sa->saddr, sa->family, src, sizeof(src));
 	xfrm_addr_str(&sa->daddr, sa->family, dst, sizeof(dst));
 	xfrm_dev_str(sa->offload_ifindex, dev, sizeof(dev));
@@ -521,42 +500,92 @@ sa_detail_cb(struct xfrm_sa *sa, void *ctx)
 }
 
 static int
-do_show_ipsec_sa_detail(struct vty *vty, bool show_keys)
+do_show_ipsec_sa_detail(struct vty *vty, struct sa_detail_ctx *ctx)
 {
-	struct sa_detail_ctx ctx = {
-		.vty		= vty,
-		.show_keys	= show_keys,
-	};
-	uint32_t flags = show_keys ? XFRM_SA_WALK_F_KEYS : 0;
+	uint32_t flags = ctx->show_keys ? XFRM_SA_WALK_F_KEYS : 0;
 
-	if (fswan_netlink_xfrm_sa_walk(sa_detail_cb, &ctx, flags) < 0) {
+	ctx->vty = vty;
+	if (fswan_netlink_xfrm_sa_walk(sa_detail_cb, ctx, flags) < 0) {
 		vty_out(vty, "%% Error dumping XFRM SAs%s", VTY_NEWLINE);
 		return CMD_WARNING;
 	}
 	return CMD_SUCCESS;
 }
 
-DEFUN(show_ipsec_sa_detail,
-      show_ipsec_sa_detail_cmd,
-      "show ipsec sa detail",
+DEFUN(show_ipsec_sa_spi,
+      show_ipsec_sa_spi_cmd,
+      "show ipsec sa spi WORD",
       SHOW_STR
       "IPsec\n"
       "Security Associations (kernel ground truth, packet-offload only)\n"
-      "Multi-line iproute2-style detail; AEAD key bytes are redacted\n")
+      "Filter by SPI (multi-line iproute2-style detail)\n"
+      "SPI (0xHEX, hex, or decimal)\n")
 {
-	return do_show_ipsec_sa_detail(vty, false);
+	struct sa_detail_ctx ctx = { .has_spi = true };
+
+	if (sa_filter_parse_spi(vty, argv[0], &ctx.spi))
+		return CMD_WARNING;
+
+	return do_show_ipsec_sa_detail(vty, &ctx);
 }
 
-DEFUN(show_ipsec_sa_detail_keys,
-      show_ipsec_sa_detail_keys_cmd,
-      "show ipsec sa detail keys",
+DEFUN(show_ipsec_sa_spi_keys,
+      show_ipsec_sa_spi_keys_cmd,
+      "show ipsec sa spi WORD keys",
       SHOW_STR
       "IPsec\n"
       "Security Associations (kernel ground truth, packet-offload only)\n"
-      "Multi-line iproute2-style detail\n"
+      "Filter by SPI (multi-line iproute2-style detail)\n"
+      "SPI (0xHEX, hex, or decimal)\n"
       "Reveal AEAD key bytes in hex (sensitive — avoid logging this output)\n")
 {
-	return do_show_ipsec_sa_detail(vty, true);
+	struct sa_detail_ctx ctx = { .has_spi = true, .show_keys = true };
+
+	if (sa_filter_parse_spi(vty, argv[0], &ctx.spi))
+		return CMD_WARNING;
+
+	return do_show_ipsec_sa_detail(vty, &ctx);
+}
+
+DEFUN(show_ipsec_sa_pair4,
+      show_ipsec_sa_pair4_cmd,
+      "show ipsec sa A.B.C.D A.B.C.D",
+      SHOW_STR
+      "IPsec\n"
+      "Security Associations (kernel ground truth, packet-offload only)\n"
+      "Source IPv4 (multi-line iproute2-style detail)\n"
+      "Destination IPv4\n")
+{
+	struct sa_detail_ctx ctx = { .family = AF_INET, .has_pair = true };
+
+	if (sa_filter_parse_addr(vty, AF_INET, argv[0], &ctx.addr1) ||
+	    sa_filter_parse_addr(vty, AF_INET, argv[1], &ctx.addr2))
+		return CMD_WARNING;
+
+	return do_show_ipsec_sa_detail(vty, &ctx);
+}
+
+DEFUN(show_ipsec_sa_pair4_keys,
+      show_ipsec_sa_pair4_keys_cmd,
+      "show ipsec sa A.B.C.D A.B.C.D keys",
+      SHOW_STR
+      "IPsec\n"
+      "Security Associations (kernel ground truth, packet-offload only)\n"
+      "Source IPv4 (multi-line iproute2-style detail)\n"
+      "Destination IPv4\n"
+      "Reveal AEAD key bytes in hex (sensitive — avoid logging this output)\n")
+{
+	struct sa_detail_ctx ctx = {
+		.family		= AF_INET,
+		.has_pair	= true,
+		.show_keys	= true,
+	};
+
+	if (sa_filter_parse_addr(vty, AF_INET, argv[0], &ctx.addr1) ||
+	    sa_filter_parse_addr(vty, AF_INET, argv[1], &ctx.addr2))
+		return CMD_WARNING;
+
+	return do_show_ipsec_sa_detail(vty, &ctx);
 }
 
 
@@ -1152,13 +1181,13 @@ static struct cmd_element *const show_cmds[] = {
 	&show_ipsec_cmd,
 	&show_ipsec_stats_cmd,
 	&show_ipsec_sa_cmd,
-	&show_ipsec_sa_detail_cmd,
-	&show_ipsec_sa_detail_keys_cmd,
 	&show_ipsec_sa_peer4_cmd,
 	&show_ipsec_sa_pair4_cmd,
+	&show_ipsec_sa_pair4_keys_cmd,
 	&show_ipsec_sa_peer6_cmd,
 	&show_ipsec_sa_pair6_cmd,
 	&show_ipsec_sa_spi_cmd,
+	&show_ipsec_sa_spi_keys_cmd,
 	&show_ipsec_sa_iface_cmd,
 	&show_ipsec_policy_cmd,
 	&show_ipsec_policy_filter4_cmd,

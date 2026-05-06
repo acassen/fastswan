@@ -231,6 +231,7 @@ fswan_bpf_prog_attach(struct fswan_bpf_prog *p, struct interface *iface)
 {
 	struct bpf_program *bpf_prog;
 	char errmsg[FSWAN_XDP_STRERR_BUFSIZE];
+	__u32 prog_id;
 	int err;
 
 	/* Lazy-load on first attach if needed. */
@@ -248,12 +249,20 @@ fswan_bpf_prog_attach(struct fswan_bpf_prog *p, struct interface *iface)
 		return -1;
 	}
 
-	/* Detach any stalled XDP program left by a previous run. */
-	err = bpf_xdp_detach(iface->ifindex, XDP_FLAGS_DRV_MODE, NULL);
+	/* detach any XDP program left by a previous run, in any mode. */
+	err = bpf_xdp_query_id(iface->ifindex, 0, &prog_id);
 	if (err) {
 		libbpf_strerror(err, errmsg, sizeof(errmsg));
-		log_message(LOG_INFO, "interface %s: stale XDP detach (%s)"
+		log_message(LOG_INFO, "interface %s: XDP query failed (%s)"
 				    , iface->ifname, errmsg);
+		return -1;
+	}
+
+	if (prog_id && bpf_xdp_detach(iface->ifindex, 0, NULL)) {
+		libbpf_strerror(errno, errmsg, sizeof(errmsg));
+		log_message(LOG_INFO, "interface %s: stale XDP detach failed (%s)"
+				    , iface->ifname, errmsg);
+		return -1;
 	}
 
 	iface->bpf_xdp_lnk = bpf_program__attach_xdp(bpf_prog, iface->ifindex);
