@@ -27,21 +27,16 @@
 #include <linux/types.h>
 
 #include "rbtree_types.h"
+#include "fswan_netlink_flower.h"
 
 struct interface;
 struct xfrm_policy;
 
 
-/* Selector fields match struct fswan_flower_sel exactly so a rule can
- * be passed to the netlink layer without renaming.
- */
 struct fswan_flower_rule {
 	struct rb_node		node;
 	uint32_t		handle;
-	__be32			saddr;
-	__be32			daddr;
-	uint8_t			prefixlen_s;
-	uint8_t			prefixlen_d;
+	struct fswan_flower_sel	sel;
 	uint16_t		vlan_id;
 };
 

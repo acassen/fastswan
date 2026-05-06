@@ -50,18 +50,11 @@ extern struct data *daemon_data;
 /*
  *	Type declarations
  */
-struct flower_rule_key {
-	__be32		saddr;
-	__be32		daddr;
-	uint8_t		prefixlen_s;
-	uint8_t		prefixlen_d;
-};
-
 struct flower_cache_entry {
-	int		ifindex;
-	uint32_t	handle;
-	uint64_t	pkts;
-	uint64_t	bytes;
+	int			ifindex;
+	struct fswan_flower_sel	sel;
+	uint64_t		pkts;
+	uint64_t		bytes;
 };
 
 struct flower_cache {
@@ -85,8 +78,8 @@ struct flower_replay_ctx {
 	struct flower_replay_state *state;
 };
 
-/* Per pipelined-install pending. lives from filter_add_pipelined
- * dispatch until the matching ACK fires the install_done callback. */
+/* Lives from filter_add_pipelined dispatch until the matching ACK
+ * fires the install_done callback. */
 struct flower_replay_pending {
 	struct fswan_flower_rule	*r;
 	struct interface		*iface;
@@ -95,9 +88,8 @@ struct flower_replay_pending {
 
 
 /*
- *	show-counter cache. (NULL outside cache_begin/_end pairs)
- *	fswan_flower_policy_counters consults it before
- *	falling back to per-policy netlink.
+ *	Counter cache, valid only between cache_begin/_end. NULL forces
+ *	the per-policy netlink fallback in fswan_flower_policy_counters.
  */
 static struct flower_cache *show_cache;
 
@@ -141,50 +133,42 @@ flower_egress_resolve(struct interface *iface, struct xfrm_policy *p,
 
 
 /*
- *	Rule rbtree helpers
+ *	Rule rbtree helpers, keyed on the selector tuple.
  */
 static int
-flower_rule_key_cmp(const struct flower_rule_key *k,
-		    const struct fswan_flower_rule *r)
+flower_sel_cmp(const struct fswan_flower_sel *a,
+	       const struct fswan_flower_sel *b)
 {
-	if (k->saddr != r->saddr)
-		return (k->saddr < r->saddr) ? -1 : 1;
-	if (k->daddr != r->daddr)
-		return (k->daddr < r->daddr) ? -1 : 1;
-	if (k->prefixlen_s != r->prefixlen_s)
-		return (k->prefixlen_s < r->prefixlen_s) ? -1 : 1;
-	if (k->prefixlen_d != r->prefixlen_d)
-		return (k->prefixlen_d < r->prefixlen_d) ? -1 : 1;
+	if (a->saddr != b->saddr)
+		return (a->saddr < b->saddr) ? -1 : 1;
+	if (a->daddr != b->daddr)
+		return (a->daddr < b->daddr) ? -1 : 1;
+	if (a->prefixlen_s != b->prefixlen_s)
+		return (a->prefixlen_s < b->prefixlen_s) ? -1 : 1;
+	if (a->prefixlen_d != b->prefixlen_d)
+		return (a->prefixlen_d < b->prefixlen_d) ? -1 : 1;
 	return 0;
 }
 
 static int
 flower_rule_cmp(const void *key, const struct rb_node *n)
 {
-	return flower_rule_key_cmp(key,
-		rb_entry_const(n, struct fswan_flower_rule, node));
+	return flower_sel_cmp(key,
+		&rb_entry_const(n, struct fswan_flower_rule, node)->sel);
 }
 
 static bool
 flower_rule_less(struct rb_node *a, const struct rb_node *b)
 {
-	const struct fswan_flower_rule *ra =
-		rb_entry(a, struct fswan_flower_rule, node);
-	const struct flower_rule_key key = {
-		.saddr		= ra->saddr,
-		.daddr		= ra->daddr,
-		.prefixlen_s	= ra->prefixlen_s,
-		.prefixlen_d	= ra->prefixlen_d,
-	};
-
-	return flower_rule_key_cmp(&key,
-		rb_entry_const(b, struct fswan_flower_rule, node)) < 0;
+	return flower_sel_cmp(
+		&rb_entry(a, struct fswan_flower_rule, node)->sel,
+		&rb_entry_const(b, struct fswan_flower_rule, node)->sel) < 0;
 }
 
 static struct fswan_flower_rule *
 flower_rule_find(struct interface *iface, const struct xfrm_policy *p)
 {
-	const struct flower_rule_key key = {
+	const struct fswan_flower_sel key = {
 		.saddr		= p->saddr.a4,
 		.daddr		= p->daddr.a4,
 		.prefixlen_s	= p->prefixlen_s,
@@ -203,11 +187,11 @@ flower_rule_init_from_policy(struct fswan_flower_rule *r, uint32_t handle,
 			     uint16_t vlan_id, const struct xfrm_policy *p)
 {
 	r->handle = handle;
-	r->saddr = p->saddr.a4;
-	r->daddr = p->daddr.a4;
-	r->prefixlen_s = p->prefixlen_s;
-	r->prefixlen_d = p->prefixlen_d;
 	r->vlan_id = vlan_id;
+	r->sel.saddr = p->saddr.a4;
+	r->sel.daddr = p->daddr.a4;
+	r->sel.prefixlen_s = p->prefixlen_s;
+	r->sel.prefixlen_d = p->prefixlen_d;
 }
 
 static void
@@ -217,19 +201,9 @@ flower_log_installed(const struct interface *iface,
 	log_message(LOG_INFO, "flower: flower-xfrm: adding XFRM-Policy="
 			      "{src:%u.%u.%u.%u/%d, dst:%u.%u.%u.%u/%d,"
 			      " ifindex:%d, dir:out, vlan:%u, handle:0x%x}"
-			    , NIPQUAD(r->saddr), r->prefixlen_s
-			    , NIPQUAD(r->daddr), r->prefixlen_d
+			    , NIPQUAD(r->sel.saddr), r->sel.prefixlen_s
+			    , NIPQUAD(r->sel.daddr), r->sel.prefixlen_d
 			    , iface->ifindex, r->vlan_id, r->handle);
-}
-
-static void
-flower_rule_to_sel(const struct fswan_flower_rule *r,
-		   struct fswan_flower_sel *sel)
-{
-	sel->saddr = r->saddr;
-	sel->daddr = r->daddr;
-	sel->prefixlen_s = r->prefixlen_s;
-	sel->prefixlen_d = r->prefixlen_d;
 }
 
 
@@ -240,14 +214,11 @@ static int
 flower_policy_add(struct interface *iface, struct xfrm_policy *p)
 {
 	struct fswan_flower_rule *r;
-	struct fswan_flower_sel sel;
 	uint16_t vlan_id = 0;
-	uint32_t handle;
 	int err;
 
-	/* a NEWPOLICY arriving via load-existing-xfrm-policy after
-	 * furious-mode already replayed it on this iface is expected.
-	 */
+	/* Idempotent because load-existing-xfrm-policy redispatches a
+	 * policy that furious-mode already replayed on this iface. */
 	if (flower_rule_find(iface, p))
 		return 0;
 
@@ -258,12 +229,12 @@ flower_policy_add(struct interface *iface, struct xfrm_policy *p)
 	if (!r)
 		return -1;
 
-	handle = iface->flower->next_handle++;
-	flower_rule_init_from_policy(r, handle, vlan_id, p);
-	flower_rule_to_sel(r, &sel);
+	flower_rule_init_from_policy(r, iface->flower->next_handle++,
+				     vlan_id, p);
 
-	err = fswan_netlink_flower_filter_add(iface->ifindex, handle, &sel,
-					      vlan_id, iface->ifindex);
+	err = fswan_netlink_flower_filter_add(iface->ifindex, r->handle,
+					      &r->sel, r->vlan_id,
+					      iface->ifindex);
 	if (err) {
 		log_message(LOG_INFO, "flower: %s: skip_sw filter add failed"
 				      " for src:%u.%u.%u.%u/%d dst:%u.%u.%u.%u/%d"
@@ -334,9 +305,8 @@ flower_capability_probe(struct interface *iface)
 
 
 /*
- *	When flower-mode is enabled on an iface that already has SAs/policies
- *	loaded, walk the kernel's policy table and install every matching
- *	outbound packet-offload policy.
+ *	Replay kernel-side OUT packet-offload policies into flower so SAs
+ *	already loaded survive flower-mode activation.
  */
 static void
 flower_replay_install_done(int err, void *ctx)
@@ -349,8 +319,10 @@ flower_replay_install_done(int err, void *ctx)
 				      " src:%u.%u.%u.%u/%d dst:%u.%u.%u.%u/%d"
 				      " (errno=%d %s)"
 				    , pi->iface->ifname, pi->r->handle
-				    , NIPQUAD(pi->r->saddr), pi->r->prefixlen_s
-				    , NIPQUAD(pi->r->daddr), pi->r->prefixlen_d
+				    , NIPQUAD(pi->r->sel.saddr)
+				    , pi->r->sel.prefixlen_s
+				    , NIPQUAD(pi->r->sel.daddr)
+				    , pi->r->sel.prefixlen_d
 				    , -err, strerror(-err));
 		FREE(pi->r);
 	} else {
@@ -368,9 +340,7 @@ flower_policy_add_pipelined(struct interface *iface, struct xfrm_policy *p,
 {
 	struct flower_replay_pending *pi;
 	struct fswan_flower_rule *r;
-	struct fswan_flower_sel sel;
 	uint16_t vlan_id = 0;
-	uint32_t handle;
 	int err;
 
 	if (flower_rule_find(iface, p))
@@ -387,16 +357,15 @@ flower_policy_add_pipelined(struct interface *iface, struct xfrm_policy *p,
 		return -1;
 	}
 
-	handle = iface->flower->next_handle++;
-	flower_rule_init_from_policy(r, handle, vlan_id, p);
-	flower_rule_to_sel(r, &sel);
-
+	flower_rule_init_from_policy(r, iface->flower->next_handle++,
+				     vlan_id, p);
 	pi->r = r;
 	pi->iface = iface;
 	pi->state = state;
 
-	err = fswan_netlink_flower_filter_add_pipelined(iface->ifindex, handle,
-							&sel, vlan_id,
+	err = fswan_netlink_flower_filter_add_pipelined(iface->ifindex,
+							r->handle, &r->sel,
+							r->vlan_id,
 							iface->ifindex,
 							flower_replay_install_done,
 							pi);
@@ -449,7 +418,7 @@ flower_replay_existing(struct interface *iface)
 
 
 /*
- *	Show-counter cache
+ *	Show-counter cache keyed on (ifindex, selector)
  */
 static int
 flower_cache_cmp(const void *a, const void *b)
@@ -459,16 +428,20 @@ flower_cache_cmp(const void *a, const void *b)
 
 	if (ea->ifindex != eb->ifindex)
 		return ea->ifindex - eb->ifindex;
-	if (ea->handle < eb->handle)
-		return -1;
-	if (ea->handle > eb->handle)
-		return 1;
+	if (ea->sel.saddr != eb->sel.saddr)
+		return (ea->sel.saddr < eb->sel.saddr) ? -1 : 1;
+	if (ea->sel.daddr != eb->sel.daddr)
+		return (ea->sel.daddr < eb->sel.daddr) ? -1 : 1;
+	if (ea->sel.prefixlen_s != eb->sel.prefixlen_s)
+		return (ea->sel.prefixlen_s < eb->sel.prefixlen_s) ? -1 : 1;
+	if (ea->sel.prefixlen_d != eb->sel.prefixlen_d)
+		return (ea->sel.prefixlen_d < eb->sel.prefixlen_d) ? -1 : 1;
 	return 0;
 }
 
 static void
-flower_cache_dump_cb(uint32_t handle, uint64_t pkts, uint64_t bytes,
-		     void *ctx)
+flower_cache_dump_cb(const struct fswan_flower_sel *sel,
+		     uint64_t pkts, uint64_t bytes, void *ctx)
 {
 	struct flower_cache_build_ctx *bc = ctx;
 	struct flower_cache *c = bc->c;
@@ -486,7 +459,7 @@ flower_cache_dump_cb(uint32_t handle, uint64_t pkts, uint64_t bytes,
 
 	e = &c->e[c->n++];
 	e->ifindex = bc->ifindex;
-	e->handle = handle;
+	e->sel = *sel;
 	e->pkts = pkts;
 	e->bytes = bytes;
 }
@@ -531,12 +504,12 @@ fswan_flower_counter_cache_end(void)
 }
 
 static bool
-flower_cache_lookup(int ifindex, uint32_t handle,
+flower_cache_lookup(int ifindex, const struct fswan_flower_rule *r,
 		    uint64_t *pkts, uint64_t *bytes)
 {
 	struct flower_cache_entry key = {
-		.ifindex = ifindex,
-		.handle = handle,
+		.ifindex	= ifindex,
+		.sel		= r->sel,
 	};
 	struct flower_cache_entry *found;
 
@@ -602,8 +575,6 @@ fswan_flower_enable(struct interface *iface)
 		return -1;
 	}
 	iface->flower->next_handle = 1;
-	/* PMALLOC zeroes the rb_root; nothing else to init. */
-
 	flower_replay_existing(iface);
 	return 0;
 }
@@ -616,9 +587,8 @@ fswan_flower_disable(struct interface *iface)
 	if (!iface->flower)
 		return;
 
-	/* Pending install ACK whose cb would rb_add into the
-	 * rules tree must not race the teardown traversal.
-	 */
+	/* Drain pending install ACKs first because their callbacks would
+	 * rb_add into the tree we are about to walk. */
 	fswan_netlink_flower_filter_drain();
 
 	rb_for_each_entry_safe(r, tmp, &iface->flower->rules, node) {
@@ -660,7 +630,7 @@ fswan_flower_policy_counters(struct interface *iface,
 	if (!r)
 		return false;
 
-	if (flower_cache_lookup(iface->ifindex, r->handle, pkts, bytes))
+	if (flower_cache_lookup(iface->ifindex, r, pkts, bytes))
 		return true;
 
 	fswan_netlink_flower_filter_stats(iface->ifindex, r->handle,

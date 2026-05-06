@@ -53,10 +53,8 @@ extern struct data *daemon_data;
 #define FLOWER_REQ_BUFSIZE	2048
 #define FLOWER_REPLY_BUFSIZE	8192
 
-/* Bounded in-flight window for pipelined filter installs. Each pending
- * ACK is around 52 bytes on the wire, so 256 entries fit well within the
- * default netlink rcvbuf.
- */
+/* 256 in-flight ACKs (~52 bytes each) fit within the default netlink
+ * rcvbuf, so the pipeline never stalls on socket backpressure. */
 #define FLOWER_PIPELINE_MAX	256
 
 
@@ -82,16 +80,15 @@ struct flower_pending {
 
 
 /*
- *	Pipelined-install state. Static FIFO since kernel ACK ordering on a
- *	single socket guarantees the head's seq is always the next ACK we
- *	receive.
+ *	Static FIFO because single-socket netlink delivers ACKs in send
+ *	order, so the head seq is always the next ACK we receive.
  */
 static struct flower_pending pipeline[FLOWER_PIPELINE_MAX];
 static int pipeline_n;
 
 
 /*
- *	NLA nest helpers (mirror of iproute2 addattr_nest / addattr_nest_end)
+ *	NLA nest helpers, same shape as iproute2 addattr_nest.
  */
 static struct rtattr *
 addattr_nest(struct nlmsghdr *n, size_t maxlen, unsigned short type)
@@ -170,11 +167,29 @@ flower_recv(void (*cb)(struct nlmsghdr *, void *), void *ctx)
 			if (cb)
 				cb(h, ctx);
 
-			/* Non-MULTI single-shot reply ends the conversation. */
+			/* Single-shot reply has no NLMSG_DONE. */
 			if (!(h->nlmsg_flags & NLM_F_MULTI))
 				return 0;
 		}
 	}
+}
+
+/*	Flush pipelined ACKs first so the sync recv does not consume them
+ *	out of order.
+ */
+static int
+flower_send_sync(struct nlmsghdr *n,
+		 void (*cb)(struct nlmsghdr *, void *), void *ctx)
+{
+	int err;
+
+	if (pipeline_n)
+		fswan_netlink_flower_filter_drain();
+
+	err = flower_send(n);
+	if (err < 0)
+		return err;
+	return flower_recv(cb, ctx);
 }
 
 
@@ -226,8 +241,8 @@ addattr_mirred_redirect(struct nlmsghdr *n, size_t maxlen, int redirect_ifindex)
 
 
 /*
- *	Wrap a single action under the parent action-list nest with its prio
- *	slot. Each action is { TCA_ACT_KIND, TCA_ACT_OPTIONS{ kind-specific } }.
+ *	One TCA_FLOWER_ACT slot per prio, each carrying TCA_ACT_KIND and
+ *	TCA_ACT_OPTIONS.
  */
 static struct rtattr *
 flower_action_open(struct nlmsghdr *n, size_t maxlen, int prio,
@@ -301,8 +316,7 @@ addattr_flower_keys(struct nlmsghdr *n, size_t maxlen,
 
 
 /*
- *	clsact qdisc add / del. Both messages share the (TC_H_CLSACT, 0)
- *	handle and the TC_H_CLSACT parent classid.
+ *	clsact qdisc add / del.
  */
 int
 fswan_netlink_flower_clsact(int ifindex, bool add)
@@ -313,36 +327,23 @@ fswan_netlink_flower_clsact(int ifindex, bool add)
 		char		buf[64];
 	} req = {
 		.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(req.t)),
-		.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK,
+		.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK |
+				   (add ? NLM_F_EXCL | NLM_F_CREATE : 0),
 		.nlh.nlmsg_type = add ? RTM_NEWQDISC : RTM_DELQDISC,
 		.t.tcm_family = AF_UNSPEC,
 		.t.tcm_ifindex = ifindex,
 		.t.tcm_parent = TC_H_CLSACT,
 		.t.tcm_handle = TC_H_MAKE(TC_H_CLSACT, 0),
 	};
-	const char *kind = "clsact";
-	int err;
 
-	if (add)
-		req.nlh.nlmsg_flags |= NLM_F_EXCL | NLM_F_CREATE;
-
-	if (pipeline_n)
-		fswan_netlink_flower_filter_drain();
-
-	addattr_l(&req.nlh, sizeof(req), TCA_KIND, kind, strlen(kind) + 1);
-
-	err = flower_send(&req.nlh);
-	if (err < 0)
-		return err;
-	return flower_recv(NULL, NULL);
+	addattr_l(&req.nlh, sizeof(req), TCA_KIND, "clsact", sizeof("clsact"));
+	return flower_send_sync(&req.nlh, NULL, NULL);
 }
 
 
 /*
- *	RTM_NEWTFILTER builder shared by the sync and pipelined paths.
- *	Sends without waiting for the ACK. Caller decides whether to
- *	consume one ACK (sync) or queue the seq for later batched drain
- *	(pipelined).
+ *	RTM_NEWTFILTER builder shared by sync and pipelined adds. Returns
+ *	the seq so the pipelined path can match the ACK later.
  */
 static int
 flower_filter_send_msg(int ifindex, uint32_t handle,
@@ -402,9 +403,8 @@ fswan_netlink_flower_filter_add(int ifindex, uint32_t handle,
 {
 	int err;
 
-	/* Sync paths cannot share the recv channel with in-flight
-	 * pipelined ACKs without disturbing FIFO order, we need
-	 * flush first. */
+	/* Flush pipelined ACKs first so the sync recv does not consume them
+	 * out of order. */
 	if (pipeline_n)
 		fswan_netlink_flower_filter_drain();
 
@@ -426,7 +426,7 @@ fswan_netlink_flower_filter_add_pipelined(int ifindex, uint32_t handle,
 	uint32_t seq;
 	int err;
 
-	/* Window is full so drain it before queueing more */
+	/* Drain when full to free a slot. */
 	if (pipeline_n == FLOWER_PIPELINE_MAX) {
 		err = fswan_netlink_flower_filter_drain();
 		if (err)
@@ -446,11 +446,9 @@ fswan_netlink_flower_filter_add_pipelined(int ifindex, uint32_t handle,
 }
 
 /*
- *	Fire every pending cb with err and clear the pipeline. Used to
- *	unwind cleanly when the kernel ACK stream is unrecoverable: each
- *	caller's cb owns the per-add allocations and must run to free
- *	them, otherwise we'd leak (and a later sync drain would dereference
- *	already-freed callsite state).
+ *	Fire every pending cb because callers own per-add allocations and
+ *	must release them when the ACK stream cannot recover. Otherwise a
+ *	later drain would dereference freed state.
  */
 static void
 flower_pipeline_abort(int err)
@@ -465,11 +463,9 @@ flower_pipeline_abort(int err)
 }
 
 /*
- *	Drain every pending pipelined-install ACK. ACKs come back in send
- *	order (single-socket netlink guarantee), so we only ever pop the
- *	head. On socket error or seq mismatch we abort the entire pipeline
- *	with -EIO rather than block forever waiting for an ACK that will
- *	never arrive.
+ *	ACKs arrive in send order (single-socket guarantee) so head-pop
+ *	suffices. Abort on seq mismatch or socket error because a missing
+ *	ACK would block the drain forever.
  */
 int
 fswan_netlink_flower_filter_drain(void)
@@ -541,9 +537,8 @@ fswan_netlink_flower_filter_drain(void)
 
 
 /*
- *	RTM_DELTFILTER. Identifies the rule by (parent, prio, handle).
- *	Protocol field is left zero so the kernel matches any protocol within
- *	the prio.
+ *	tcm_info protocol left zero so the kernel matches the rule
+ *	regardless of the protocol it was installed with.
  */
 int
 fswan_netlink_flower_filter_del(int ifindex, uint32_t handle)
@@ -562,27 +557,16 @@ fswan_netlink_flower_filter_del(int ifindex, uint32_t handle)
 		.t.tcm_info = TC_H_MAKE(FSWAN_FLOWER_PRIO << 16, 0),
 		.t.tcm_handle = handle,
 	};
-	const char *kind = "flower";
-	int err;
 
-	if (pipeline_n)
-		fswan_netlink_flower_filter_drain();
-
-	addattr_l(&req.nlh, sizeof(req), TCA_KIND, kind, strlen(kind) + 1);
-
-	err = flower_send(&req.nlh);
-	if (err < 0)
-		return err;
-	return flower_recv(NULL, NULL);
+	addattr_l(&req.nlh, sizeof(req), TCA_KIND, "flower", sizeof("flower"));
+	return flower_send_sync(&req.nlh, NULL, NULL);
 }
 
 
 /*
- *	GETTFILTER reply parser. Reads TCA_STATS2 / TCA_STATS_BASIC for the
- *	one filter the kernel just dumped to us. TCA_STATS_BASIC accumulates
- *	SW + HW counts. For skip_sw rule the SW share is zero, so the reported
- *	value is the HW counter. TCA_STATS_PKT64 (when present) provides the
- *	high 32 bits of the packet count.
+ *	TCA_STATS_BASIC sums SW + HW counts but the SW share is zero on
+ *	skip_sw rules, so the value equals the HW counter. TCA_STATS_PKT64
+ *	carries the high 32 bits when present.
  */
 static void
 parse_tca_stats_basic(struct rtattr *stats2, struct flower_stats_ctx *ctx)
@@ -607,22 +591,82 @@ parse_tca_stats_basic(struct rtattr *stats2, struct flower_stats_ctx *ctx)
 	ctx->found = true;
 }
 
+static bool
+flower_parse_be32(const struct rtattr *attr, __be32 *out)
+{
+	if (!attr || RTA_PAYLOAD(attr) != sizeof(*out))
+		return false;
+	*out = *(__be32 *) RTA_DATA(attr);
+	return true;
+}
+
+static bool
+flower_parse_sel(struct rtattr * const *tb_opts,
+		 struct fswan_flower_sel *sel)
+{
+	__be32 saddr_mask, daddr_mask;
+
+	if (!flower_parse_be32(tb_opts[TCA_FLOWER_KEY_IPV4_SRC], &sel->saddr) ||
+	    !flower_parse_be32(tb_opts[TCA_FLOWER_KEY_IPV4_SRC_MASK], &saddr_mask) ||
+	    !flower_parse_be32(tb_opts[TCA_FLOWER_KEY_IPV4_DST], &sel->daddr) ||
+	    !flower_parse_be32(tb_opts[TCA_FLOWER_KEY_IPV4_DST_MASK], &daddr_mask))
+		return false;
+
+	sel->prefixlen_s = inet_mask_to_bits(saddr_mask);
+	sel->prefixlen_d = inet_mask_to_bits(daddr_mask);
+	return true;
+}
+
+/*	cls_flower does not emit TCA_STATS2 at filter level, so stats live
+ *	under each action's TCA_ACT_STATS instead. Reading the first action
+ *	is enough because pipe-chained actions share the same packet count.
+ */
+static bool
+flower_parse_action_stats(struct rtattr * const *tb_opts,
+			  struct flower_stats_ctx *ctx)
+{
+	struct rtattr *tb_acts[TCA_ACT_MAX_PRIO + 1];
+	struct rtattr *tb_act[TCA_ACT_MAX + 1];
+	struct rtattr *act_nest = tb_opts[TCA_FLOWER_ACT];
+	int i;
+
+	if (!act_nest)
+		return false;
+
+	parse_rtattr(tb_acts, TCA_ACT_MAX_PRIO,
+		     RTA_DATA(act_nest), RTA_PAYLOAD(act_nest));
+
+	for (i = 0; i <= TCA_ACT_MAX_PRIO; i++) {
+		if (!tb_acts[i])
+			continue;
+		parse_rtattr(tb_act, TCA_ACT_MAX,
+			     RTA_DATA(tb_acts[i]), RTA_PAYLOAD(tb_acts[i]));
+		if (tb_act[TCA_ACT_STATS])
+			parse_tca_stats_basic(tb_act[TCA_ACT_STATS], ctx);
+		return ctx->found;
+	}
+	return false;
+}
+
 static void
 flower_stats_cb(struct nlmsghdr *h, void *arg)
 {
 	struct flower_stats_ctx *ctx = arg;
 	struct tcmsg *t = NLMSG_DATA(h);
 	struct rtattr *tb[TCA_MAX + 1];
+	struct rtattr *tb_opts[TCA_FLOWER_MAX + 1];
 	int len = h->nlmsg_len - NLMSG_LENGTH(sizeof(*t));
 
 	if (h->nlmsg_type != RTM_NEWTFILTER || len < 0)
 		return;
 
 	parse_rtattr(tb, TCA_MAX, TCA_RTA(t), len);
-	if (!tb[TCA_STATS2])
+	if (!tb[TCA_OPTIONS])
 		return;
 
-	parse_tca_stats_basic(tb[TCA_STATS2], ctx);
+	parse_rtattr(tb_opts, TCA_FLOWER_MAX,
+		     RTA_DATA(tb[TCA_OPTIONS]), RTA_PAYLOAD(tb[TCA_OPTIONS]));
+	flower_parse_action_stats(tb_opts, ctx);
 }
 
 int
@@ -643,20 +687,12 @@ fswan_netlink_flower_filter_stats(int ifindex, uint32_t handle,
 		.t.tcm_info = TC_H_MAKE(FSWAN_FLOWER_PRIO << 16, 0),
 		.t.tcm_handle = handle,
 	};
-	const char *kind = "flower";
-	struct flower_stats_ctx ctx = { 0 };
+	struct flower_stats_ctx ctx = {};
 	int err;
 
-	if (pipeline_n)
-		fswan_netlink_flower_filter_drain();
+	addattr_l(&req.nlh, sizeof(req), TCA_KIND, "flower", sizeof("flower"));
 
-	addattr_l(&req.nlh, sizeof(req), TCA_KIND, kind, strlen(kind) + 1);
-
-	err = flower_send(&req.nlh);
-	if (err < 0)
-		return err;
-
-	err = flower_recv(flower_stats_cb, &ctx);
+	err = flower_send_sync(&req.nlh, flower_stats_cb, &ctx);
 	if (err < 0 || !ctx.found)
 		return err < 0 ? err : -1;
 
@@ -667,11 +703,9 @@ fswan_netlink_flower_filter_stats(int ifindex, uint32_t handle,
 
 
 /*
- *	RTM_GETTFILTER NLM_F_DUMP. One round-trip yields every filter under
- *	(clsact ingress, FSWAN_FLOWER_PRIO) on the iface. per-message
- *	callback fires once per filter with its handle and HW counter. Used
- *	by the show layer to amortize per-policy stats reads (one syscall
- *	per iface instead of one per policy).
+ *	Bulk dump fires the callback per filter so the show layer builds a
+ *	per-iface cache in one syscall. The cache keys on selector because
+ *	the kernel can silently reassign tcm_handle.
  */
 static void
 flower_dump_msg_cb(struct nlmsghdr *h, void *arg)
@@ -679,24 +713,30 @@ flower_dump_msg_cb(struct nlmsghdr *h, void *arg)
 	struct flower_dump_ctx *d = arg;
 	struct tcmsg *t = NLMSG_DATA(h);
 	struct rtattr *tb[TCA_MAX + 1];
-	struct flower_stats_ctx s = { 0 };
+	struct rtattr *tb_opts[TCA_FLOWER_MAX + 1];
+	struct flower_stats_ctx s = {};
+	struct fswan_flower_sel sel = {};
 	int len = h->nlmsg_len - NLMSG_LENGTH(sizeof(*t));
 
 	if (h->nlmsg_type != RTM_NEWTFILTER || len < 0)
 		return;
 
 	parse_rtattr(tb, TCA_MAX, TCA_RTA(t), len);
-	if (!tb[TCA_STATS2])
+	if (!tb[TCA_OPTIONS])
 		return;
 
-	parse_tca_stats_basic(tb[TCA_STATS2], &s);
-	if (s.found)
-		d->cb(t->tcm_handle, s.pkts, s.bytes, d->ctx);
+	parse_rtattr(tb_opts, TCA_FLOWER_MAX,
+		     RTA_DATA(tb[TCA_OPTIONS]), RTA_PAYLOAD(tb[TCA_OPTIONS]));
+	if (!flower_parse_sel(tb_opts, &sel))
+		return;
+	if (!flower_parse_action_stats(tb_opts, &s))
+		return;
+
+	d->cb(&sel, s.pkts, s.bytes, d->ctx);
 }
 
 int
-fswan_netlink_flower_dump(int ifindex,
-			  fswan_flower_dump_cb cb, void *ctx)
+fswan_netlink_flower_dump(int ifindex, fswan_flower_dump_cb cb, void *ctx)
 {
 	struct {
 		struct nlmsghdr	nlh;
@@ -711,19 +751,10 @@ fswan_netlink_flower_dump(int ifindex,
 		.t.tcm_parent = TC_H_MAKE(TC_H_CLSACT, TC_H_MIN_INGRESS),
 		.t.tcm_info = TC_H_MAKE(FSWAN_FLOWER_PRIO << 16, 0),
 	};
-	const char *kind = "flower";
 	struct flower_dump_ctx d = { .cb = cb, .ctx = ctx };
-	int err;
 
-	if (pipeline_n)
-		fswan_netlink_flower_filter_drain();
-
-	addattr_l(&req.nlh, sizeof(req), TCA_KIND, kind, strlen(kind) + 1);
-
-	err = flower_send(&req.nlh);
-	if (err < 0)
-		return err;
-	return flower_recv(flower_dump_msg_cb, &d);
+	addattr_l(&req.nlh, sizeof(req), TCA_KIND, "flower", sizeof("flower"));
+	return flower_send_sync(&req.nlh, flower_dump_msg_cb, &d);
 }
 
 

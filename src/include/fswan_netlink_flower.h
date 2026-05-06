@@ -42,7 +42,7 @@ struct fswan_flower_sel {
 };
 
 
-typedef void (*fswan_flower_dump_cb)(uint32_t handle,
+typedef void (*fswan_flower_dump_cb)(const struct fswan_flower_sel *sel,
 				     uint64_t pkts, uint64_t bytes,
 				     void *ctx);
 typedef void (*fswan_flower_install_cb)(int err, void *ctx);
