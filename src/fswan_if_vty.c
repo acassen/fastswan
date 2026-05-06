@@ -40,6 +40,7 @@
 #include "fswan_if_rxq.h"
 #include "fswan_bpf_prog.h"
 #include "fswan_hairpin.h"
+#include "fswan_flower.h"
 
 
 /* Extern data */
@@ -387,6 +388,46 @@ DEFUN(no_if_hairpin_to_nexthop,
 	return CMD_SUCCESS;
 }
 
+DEFUN(if_flower_mode,
+      if_flower_mode_cmd,
+      "flower-mode",
+      "Replace the XDP egress path with mlx5 TC flower HW offload."
+      " Outbound XFRM packet-mode policies on this interface are mirrored to"
+      " clsact ingress flower rules with skip_sw and a mirred-egress redirect"
+      " into the egress IPsec chain. mlx5 driver only.\n")
+{
+	struct interface *iface = vty->index;
+
+	if (fswan_flower_enable(iface)) {
+		vty_out(vty, "%% flower-mode activation failed on %s%s"
+			   , iface->ifname, VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+	return CMD_SUCCESS;
+}
+
+ALIAS(if_flower_mode,
+      if_furious_mode_cmd,
+      "furious-mode",
+      "Alias of flower-mode\n")
+
+DEFUN(no_if_flower_mode,
+      no_if_flower_mode_cmd,
+      "no flower-mode",
+      "Tear down the TC flower HW offload state on this interface, removing"
+      " every installed filter and the clsact qdisc\n")
+{
+	struct interface *iface = vty->index;
+
+	fswan_flower_disable(iface);
+	return CMD_SUCCESS;
+}
+
+ALIAS(no_if_flower_mode,
+      no_if_furious_mode_cmd,
+      "no furious-mode",
+      "Alias of no flower-mode\n")
+
 
 /*
  *	Show commands
@@ -520,6 +561,8 @@ interface_config_write(struct vty *vty)
 		if (iface->hairpin)
 			vty_out(vty, " hairpin-to-nexthop %u.%u.%u.%u%s"
 				   , NIPQUAD(iface->hairpin->nh_addr), VTY_NEWLINE);
+		if (iface->flower)
+			vty_out(vty, " flower-mode%s", VTY_NEWLINE);
 		vty_out(vty, " %sshutdown%s"
 			   , __test_bit(FSWAN_INTERFACE_FL_SHUTDOWN_BIT, &iface->flags) ? "" : "no "
 			   , VTY_NEWLINE);
@@ -545,6 +588,10 @@ cmd_ext_interface_install(void)
 	install_element(INTERFACE_NODE, &no_if_bpf_program_cmd);
 	install_element(INTERFACE_NODE, &if_hairpin_to_nexthop_cmd);
 	install_element(INTERFACE_NODE, &no_if_hairpin_to_nexthop_cmd);
+	install_element(INTERFACE_NODE, &if_flower_mode_cmd);
+	install_element(INTERFACE_NODE, &if_furious_mode_cmd);
+	install_element(INTERFACE_NODE, &no_if_flower_mode_cmd);
+	install_element(INTERFACE_NODE, &no_if_furious_mode_cmd);
 	install_element(INTERFACE_NODE, &if_shutdown_cmd);
 	install_element(INTERFACE_NODE, &if_no_shutdown_cmd);
 

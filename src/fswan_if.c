@@ -38,6 +38,7 @@
 #include "fswan_monitor.h"
 #include "fswan_bpf_prog.h"
 #include "fswan_hairpin.h"
+#include "fswan_flower.h"
 
 
 /* Extern data */
@@ -129,6 +130,7 @@ fswan_if_destroy(struct interface *iface)
 	list_head_del(&iface->next);
 
 	fswan_hairpin_clear(iface);
+	fswan_flower_disable(iface);
 
 	if (iface->bpf_prog) {
 		fswan_bpf_prog_detach(iface->bpf_prog, iface);

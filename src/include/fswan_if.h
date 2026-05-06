@@ -25,12 +25,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <net/if.h>
-
 #include <linux/if_ether.h>
-
 #include "list_head.h"
 #include "ethtool.h"
 #include "gauge.h"
+#include "fswan_flower.h"
 
 /* Forward declarations */
 struct bpf_link;
@@ -44,9 +43,7 @@ enum fswan_interface_flags {
 	FSWAN_INTERFACE_FL_DESTROYING_BIT,
 };
 
-/* One direction of a rate-tracked counter source: holds the derived rates,
- * the previous absolute counters used as the rate baseline, and the rolling
- * history fed every ETHTOOL_POLL_TICKS. */
+/* Types */
 struct iface_rate {
 	uint64_t		bw_bps;
 	uint64_t		pps;
@@ -56,7 +53,6 @@ struct iface_rate {
 	struct gauge_history	pps_history;
 };
 
-/* Types */
 struct interface {
 	char			ifname[IF_NAMESIZE];
 	int			ifindex;
@@ -64,20 +60,23 @@ struct interface {
 
 	/* L2 attributes from RTM_NEWLINK */
 	uint8_t			hw_addr[ETH_ALEN];
-	uint16_t		vlan_id;	/* IFLA_VLAN_ID, 0 if not a VLAN subif */
+	uint16_t		vlan_id;
 
 	/* point to real device if it's a virtual device */
 	struct interface	*link_iface;
 
 	/* attached BPF program */
 	struct fswan_bpf_prog	*bpf_prog;
-	struct list_head	bpf_prog_list;	/* in bpf_prog->iface_bind_list */
+	struct list_head	bpf_prog_list;
 	struct bpf_link		*bpf_xdp_lnk;
 
-	/* hairpin-to-nexthop config (NULL if not configured) */
+	/* hairpin-to-nexthop config */
 	struct fswan_hairpin	*hairpin;
 
-	/* ethtool PHY counters + derived rates (refreshed every ETHTOOL_POLL_TICKS) */
+	/* flower-mode (TC HW offload) */
+	struct fswan_flower	*flower;
+
+	/* ethtool PHY counters + derived rates */
 	struct ethtool_phy_stats phy_stats;
 	struct ethtool_ipsec_stats ipsec_stats;
 	struct iface_rate	rx;
@@ -86,14 +85,14 @@ struct interface {
 	struct iface_rate	ipsec_tx;
 	uint64_t		prev_ts_ns;
 
-	/* per-queue ethtool stats; array of max(nr_rx_queues, nr_tx_queues) */
+	/* per-queue ethtool stats */
 	uint32_t		nr_rx_queues;
 	uint32_t		nr_tx_queues;
 	struct ethtool_q_stats	*queue_stats;
 	struct ethtool_cache	*ethtool_cache;
 
 	unsigned long		flags;
-	struct list_head	next;		/* in daemon_data->interfaces */
+	struct list_head	next;
 };
 
 

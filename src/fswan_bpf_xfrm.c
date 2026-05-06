@@ -43,6 +43,7 @@
 #include "fswan_bpf.h"
 #include "fswan_bpf_xfrm.h"
 #include "fswan_netlink.h"
+#include "fswan_flower.h"
 
 
 /* Extern data */
@@ -401,6 +402,11 @@ fswan_bpf_xfrm_action(int action, struct xfrm_policy *p)
 	iface = fswan_if_get_by_ifindex(p->ifindex, false);
 	if (!iface)
 		return 0;
+
+	/* flower-mode owns outbound on this iface; inbound stays on XDP. */
+	if (iface->flower &&
+	    __test_bit(XFRM_POLICY_FL_OUT_BIT, &p->flags))
+		return fswan_flower_xfrm_action(action, iface, p);
 
 	if (!iface->bpf_prog || !iface->bpf_prog->bpf_maps)
 		return 0;

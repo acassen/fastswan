@@ -39,6 +39,8 @@
 #include "memory.h"
 #include "fswan_netlink.h"
 #include "fswan_bpf_xfrm.h"
+#include "fswan_if.h"
+#include "fswan_flower.h"
 
 #ifndef XFRM_OFFLOAD_PACKET
 #define XFRM_OFFLOAD_PACKET	4
@@ -600,6 +602,8 @@ xfrm_policy_probe_backends(const struct xfrm_policy *p,
 			   uint64_t *pkts_out, uint64_t *bytes_out)
 {
 	uint32_t backends = 0;
+	uint64_t flower_pkts = 0, flower_bytes = 0;
+	struct interface *iface;
 
 	*pkts_out = 0;
 	*bytes_out = 0;
@@ -610,6 +614,14 @@ xfrm_policy_probe_backends(const struct xfrm_policy *p,
 			p->daddr.a4, p->prefixlen_d,
 			pkts_out, bytes_out))
 		backends |= XFRM_BACKEND_XDP;
+
+	iface = fswan_if_get_by_ifindex(p->ifindex, false);
+	if (iface && iface->flower &&
+	    fswan_flower_policy_counters(iface, p, &flower_pkts, &flower_bytes)) {
+		backends |= XFRM_BACKEND_FLOWER_HW;
+		*pkts_out += flower_pkts;
+		*bytes_out += flower_bytes;
+	}
 
 	return backends;
 }
@@ -726,19 +738,23 @@ policy_scan_table_alloc(struct vty *vty)
 static int
 do_show_ipsec_policy_scan(struct vty *vty, struct policy_scan_ctx *ctx)
 {
+	int rc = CMD_SUCCESS;
+
 	ctx->tbl = policy_scan_table_alloc(vty);
 	if (!ctx->tbl)
 		return CMD_WARNING;
 
+	fswan_flower_counter_cache_begin();
 	if (fswan_netlink_xfrm_policy_walk(policy_scan_cb, ctx) < 0) {
-		table_destroy(ctx->tbl);
 		vty_out(vty, "%% Error dumping XFRM policies%s", VTY_NEWLINE);
-		return CMD_WARNING;
+		rc = CMD_WARNING;
+	} else {
+		table_vty_out(ctx->tbl, vty);
 	}
+	fswan_flower_counter_cache_end();
 
-	table_vty_out(ctx->tbl, vty);
 	table_destroy(ctx->tbl);
-	return CMD_SUCCESS;
+	return rc;
 }
 
 DEFUN(show_ipsec_policy,
@@ -910,6 +926,18 @@ combined_render_policy(struct vty *vty, const struct xfrm_policy *p)
 		fswan_bpf_xfrm_policy_counters_by_selector_vty(vty,
 			p->saddr.a4, p->prefixlen_s,
 			p->daddr.a4, p->prefixlen_d);
+
+	if (backends & XFRM_BACKEND_FLOWER_HW) {
+		struct interface *iface = fswan_if_get_by_ifindex(p->ifindex, false);
+		uint64_t fp = 0, fb = 0;
+
+		if (iface &&
+		    fswan_flower_policy_counters(iface, p, &fp, &fb))
+			vty_out(vty, "            CLEAR (flower):"
+				     " pkts:%lu bytes:%lu%s",
+				     (unsigned long) fp, (unsigned long) fb,
+				     VTY_NEWLINE);
+	}
 }
 
 static int
@@ -1026,11 +1054,13 @@ DEFUN(show_ipsec,
 		goto err;
 	}
 
+	fswan_flower_counter_cache_begin();
 	for (i = 0; i < sas.n; i++) {
 		if (i)
 			vty_out(vty, "%s", VTY_NEWLINE);
 		combined_render_sa_block(vty, &sas.items[i], &policies);
 	}
+	fswan_flower_counter_cache_end();
 
 	FREE_PTR(sas.items);
 	FREE_PTR(policies.items);

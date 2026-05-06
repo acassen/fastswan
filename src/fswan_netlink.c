@@ -44,6 +44,7 @@
 #include "fswan_data.h"
 #include "fswan_if.h"
 #include "fswan_netlink.h"
+#include "fswan_netlink_flower.h"
 #include "fswan_hairpin.h"
 #include "fswan_bpf_xfrm.h"
 
@@ -695,12 +696,19 @@ fswan_netlink_init(void)
 		return -1;
 	}
 
+	if (fswan_netlink_flower_init() < 0) {
+		fswan_netlink_xfrm_destroy();
+		netlink_close(&nl_cmd);
+		return -1;
+	}
+
 	/* RTNLGRP_NEIGH + RTNLGRP_IPV4_ROUTE reflector for hairpin tracking. */
 	err = netlink_open(&nl_kernel_route, daemon_data->nl_rcvbuf_size, SOCK_NONBLOCK
 				          , NETLINK_ROUTE, RTNLGRP_NEIGH,
 				            RTNLGRP_IPV4_ROUTE, 0);
 	if (err) {
 		log_message(LOG_INFO, "Error while registering Kernel netlink route reflector");
+		fswan_netlink_flower_destroy();
 		fswan_netlink_xfrm_destroy();
 		netlink_close(&nl_cmd);
 		return -1;
@@ -719,6 +727,7 @@ fswan_netlink_destroy(void)
 {
 	log_message(LOG_INFO, "Unregistering Kernel netlink reflectors");
 	netlink_close(&nl_kernel_route);
+	fswan_netlink_flower_destroy();
 	fswan_netlink_xfrm_destroy();
 	netlink_close(&nl_cmd);
 	return 0;
