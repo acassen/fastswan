@@ -51,12 +51,6 @@ enum fswan_bpf_prog_flags {
 	FSWAN_BPF_PROG_FL_LOAD_ERR_BIT,
 };
 
-/* A declared BPF program. Lifecycle:
- *   declare -> SHUTDOWN_BIT set, no kernel state.
- *   load    -> bpf_object__open + load + map wiring; SHUTDOWN_BIT cleared.
- *   attach  -> per-interface bpf_program__attach_xdp; iface linked into
- *              iface_bind_list.
- */
 struct fswan_bpf_prog {
 	char			name[FSWAN_STR_MAX_LEN];
 	char			description[FSWAN_STR_MAX_LEN];
@@ -65,12 +59,12 @@ struct fswan_bpf_prog {
 	char			pin_root_path[FSWAN_STR_MAX_LEN];
 	struct bpf_object	*bpf_obj;
 	struct fswan_bpf_maps	*bpf_maps;
-	struct list_head	iface_bind_list;	/* attached interfaces */
-	struct list_head	next;			/* in daemon_data->bpf_progs */
+	struct list_head	iface_bind_list;
+	struct list_head	next;
 	unsigned long		flags;
 
 	/* Two-stage LPM allocator state. dst_id_bitmap reserves the 32-bit
-	 * tokens stored in dst_lpm; dst_id_refcount tracks how many
+	 * tokens stored in dst_lpm. dst_id_refcount tracks how many
 	 * policy_lpm entries reference each token. stats_slot_bitmap reserves
 	 * the indexes into xfrm_policy_stats_array.
 	 */
@@ -89,3 +83,4 @@ int fswan_bpf_prog_attach(struct fswan_bpf_prog *p, struct interface *iface);
 void fswan_bpf_prog_detach(struct fswan_bpf_prog *p, struct interface *iface);
 void fswan_bpf_prog_destroy(struct fswan_bpf_prog *p);
 void fswan_bpf_prog_destroy_all(void);
+int fswan_bpf_prog_any_loaded(void);

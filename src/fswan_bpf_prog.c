@@ -86,7 +86,7 @@ fswan_bpf_prog_alloc(const char *name)
 /*
  *	Helpers
  */
-static int
+int
 fswan_bpf_prog_any_loaded(void)
 {
 	struct fswan_bpf_prog *p;
@@ -146,7 +146,7 @@ fswan_bpf_prog_lookup_program(struct fswan_bpf_prog *p)
 
 
 /*
- *	Lazy load: open + verify + xfrm map wiring.
+ *	Lazy load (open + verify + xfrm map wiring)
  */
 int
 fswan_bpf_prog_load(struct fswan_bpf_prog *p)
@@ -194,7 +194,6 @@ fswan_bpf_prog_load(struct fswan_bpf_prog *p)
 
 	__clear_bit(FSWAN_BPF_PROG_FL_SHUTDOWN_BIT, &p->flags);
 	__clear_bit(FSWAN_BPF_PROG_FL_LOAD_ERR_BIT, &p->flags);
-	__set_bit(FSWAN_FL_XDP_XFRM_LOADED_BIT, &daemon_data->flags);
 	log_message(LOG_INFO, "bpf-program '%s': loaded from %s", p->name, p->path);
 	return 0;
 }
@@ -220,8 +219,6 @@ fswan_bpf_prog_unload(struct fswan_bpf_prog *p)
 	}
 
 	__set_bit(FSWAN_BPF_PROG_FL_SHUTDOWN_BIT, &p->flags);
-	if (!fswan_bpf_prog_any_loaded())
-		__clear_bit(FSWAN_FL_XDP_XFRM_LOADED_BIT, &daemon_data->flags);
 	log_message(LOG_INFO, "bpf-program '%s': unloaded", p->name);
 }
 

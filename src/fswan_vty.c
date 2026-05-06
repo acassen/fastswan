@@ -42,7 +42,7 @@ extern struct data *daemon_data;
 static bool
 xdp_xfrm_is_loaded(struct vty *vty)
 {
-	if (__test_bit(FSWAN_FL_XDP_XFRM_LOADED_BIT, &daemon_data->flags))
+	if (fswan_bpf_prog_any_loaded())
 		return true;
 
 	vty_out(vty, "%% XDP XFRM offload is not configured. Ignoring%s"

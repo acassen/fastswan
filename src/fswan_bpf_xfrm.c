@@ -50,9 +50,6 @@ extern struct data *daemon_data;
 
 /*
  *	BPF MAP related
- *
- *	Called from fswan_bpf_prog_load() right after bpf_object__load(),
- *	wires the xfrm-specific maps into the program's bpf_maps array.
  */
 int
 fswan_bpf_xfrm_map_load(struct fswan_bpf_prog *p)
@@ -397,17 +394,18 @@ fswan_bpf_xfrm_action(int action, struct xfrm_policy *p)
 	if (__test_bit(FSWAN_FL_STOP_BIT, &daemon_data->flags))
 		return 0;
 
-	if (!__test_bit(FSWAN_FL_XDP_XFRM_LOADED_BIT, &daemon_data->flags))
-		return -1;
-
 	/* FIXME: Add support to IPv6 */
 	if (p->family != AF_INET)
 		return -1;
 
 	iface = fswan_if_get_by_ifindex(p->ifindex, false);
-	if (!iface || !iface->bpf_prog)
+	if (!iface)
 		return 0;
 
+	if (!iface->bpf_prog || !iface->bpf_prog->bpf_maps)
+		return 0;
+	if (__test_bit(FSWAN_BPF_PROG_FL_SHUTDOWN_BIT, &iface->bpf_prog->flags))
+		return 0;
 	return fswan_bpf_xfrm_lpm_action(action, iface->bpf_prog, p);
 }
 
@@ -421,7 +419,6 @@ fswan_bpf_xfrm_policy_counters_vty(struct vty *vty, struct fswan_bpf_prog *opts,
 {
 	struct bpf_map *map = opts->bpf_maps[FSWAN_BPF_MAP_POLICY_STATS_ARRAY].map;
 	unsigned int nr_cpus = libbpf_num_possible_cpus();
-	uint64_t pkts = 0, bytes = 0;
 	struct xfrm_policy_stats *s;
 	uint32_t slot = val->stats_slot;
 	size_t sz = nr_cpus * sizeof(*s);
@@ -442,13 +439,13 @@ fswan_bpf_xfrm_policy_counters_vty(struct vty *vty, struct fswan_bpf_prog *opts,
 		goto end;
 	}
 
-	for (i = 0; i < (int) nr_cpus; i++) {
-		pkts += s[i].pkts;
-		bytes += s[i].bytes;
+	for (i = 1; i < nr_cpus; i++) {
+		s[0].pkts += s[i].pkts;
+		s[0].bytes += s[i].bytes;
 	}
 
-	vty_out(vty, "            %s: pkts:%ld bytes:%ld%s"
-		   , opts->name, pkts, bytes, VTY_NEWLINE);
+	vty_out(vty, "            %s: pkts:%llu bytes:%llu%s"
+		   , opts->name, s[0].pkts, s[0].bytes, VTY_NEWLINE);
 end:
 	free(s);
 }
@@ -534,7 +531,6 @@ fswan_bpf_xfrm_policy_get_counters(struct fswan_bpf_prog *opts, uint32_t slot,
 	struct bpf_map *map = opts->bpf_maps[FSWAN_BPF_MAP_POLICY_STATS_ARRAY].map;
 	unsigned int nr_cpus = libbpf_num_possible_cpus();
 	struct xfrm_policy_stats *s;
-	uint64_t pkts = 0, bytes = 0;
 	unsigned int i;
 	int err;
 
@@ -553,14 +549,14 @@ fswan_bpf_xfrm_policy_get_counters(struct fswan_bpf_prog *opts, uint32_t slot,
 		return -1;
 	}
 
-	for (i = 0; i < nr_cpus; i++) {
-		pkts += s[i].pkts;
-		bytes += s[i].bytes;
+	for (i = 1; i < nr_cpus; i++) {
+		s[0].pkts += s[i].pkts;
+		s[0].bytes += s[i].bytes;
 	}
 
+	*pkts_out = s[0].pkts;
+	*bytes_out = s[0].bytes;
 	free(s);
-	*pkts_out = pkts;
-	*bytes_out = bytes;
 	return 0;
 }
 
