@@ -141,6 +141,7 @@ ethtool_q_stats_add(struct ethtool_q_stats *dst, const struct ethtool_q_stats *s
 /* Prototypes */
 int sysfs_set_iface_forwarding(const char *ifname, bool ipv4, bool ipv6);
 int ethtool_get_nr_queues(const char *ifname, uint32_t *rx, uint32_t *tx);
+int ethtool_get_driver_name(const char *ifname, char *buf, size_t len);
 int ethtool_gstats_cache_init(struct ethtool_cache **out,
 			      const char *ifname,
 			      uint32_t nr_queues);

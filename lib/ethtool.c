@@ -175,6 +175,28 @@ ethtool_send(int fd, const char *ifname, void *cmd)
 }
 
 
+int
+ethtool_get_driver_name(const char *ifname, char *buf, size_t len)
+{
+	struct ethtool_drvinfo drvinfo = { .cmd = ETHTOOL_GDRVINFO };
+	int fd, err;
+
+	if (!buf || !len)
+		return -1;
+
+	fd = ethtool_open();
+	if (fd < 0)
+		return -errno;
+
+	err = ethtool_send(fd, ifname, &drvinfo);
+	close(fd);
+	if (err)
+		return -errno;
+
+	bsd_strlcpy(buf, drvinfo.driver, len);
+	return 0;
+}
+
 /*
  * get configured number of rx/tx queues for requested iface,
  * from kernel ethtool
