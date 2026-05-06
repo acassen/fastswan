@@ -274,17 +274,21 @@ addattr_flower_keys(struct nlmsghdr *n, size_t maxlen,
 		    const struct fswan_flower_sel *sel, uint16_t vlan_id)
 {
 	__be16 eth_type_ip = htons(ETH_P_IP);
+	__be16 eth_type_vlan = htons(ETH_P_8021Q);
 	__be32 saddr_mask = inet_bits_to_mask(sel->prefixlen_s);
 	__be32 daddr_mask = inet_bits_to_mask(sel->prefixlen_d);
 
 	if (vlan_id) {
+		addattr_l(n, maxlen, TCA_FLOWER_KEY_ETH_TYPE,
+			  &eth_type_vlan, sizeof(eth_type_vlan));
 		addattr_l(n, maxlen, TCA_FLOWER_KEY_VLAN_ID,
 			  &vlan_id, sizeof(vlan_id));
 		addattr_l(n, maxlen, TCA_FLOWER_KEY_VLAN_ETH_TYPE,
 			  &eth_type_ip, sizeof(eth_type_ip));
+	} else {
+		addattr_l(n, maxlen, TCA_FLOWER_KEY_ETH_TYPE,
+			  &eth_type_ip, sizeof(eth_type_ip));
 	}
-	addattr_l(n, maxlen, TCA_FLOWER_KEY_ETH_TYPE,
-		  &eth_type_ip, sizeof(eth_type_ip));
 	addattr_l(n, maxlen, TCA_FLOWER_KEY_IPV4_SRC,
 		  &sel->saddr, sizeof(sel->saddr));
 	addattr_l(n, maxlen, TCA_FLOWER_KEY_IPV4_SRC_MASK,

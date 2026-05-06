@@ -29,12 +29,9 @@
 #include "list_head.h"
 #include "ethtool.h"
 #include "gauge.h"
+#include "fswan_bpf_prog.h"
+#include "fswan_hairpin.h"
 #include "fswan_flower.h"
-
-/* Forward declarations */
-struct bpf_link;
-struct fswan_bpf_prog;
-struct fswan_hairpin;
 
 /* Per-interface flags */
 enum fswan_interface_flags {

@@ -58,8 +58,8 @@ alloc_daemon_data(void)
 void
 free_daemon_data(void)
 {
-	fswan_netlink_destroy();
 	fswan_if_destroy_all();
+	fswan_netlink_destroy();
 	fswan_bpf_destroy();
 	FREE(daemon_data);
 }

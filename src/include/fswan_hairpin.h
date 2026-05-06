@@ -29,10 +29,10 @@
 
 /* hairpin-to-nexthop per-interface state */
 struct fswan_hairpin {
-	uint32_t	nh_addr;		/* user-configured nexthop, net order */
-	uint32_t	via_addr;		/* address actually ARP-resolved */
-	uint8_t		hw_addr[ETH_ALEN];	/* resolved L2 of via_addr */
-	uint16_t	vlan_id;		/* egress VLAN id, 0 = untagged */
+	uint32_t	nh_addr;
+	uint32_t	via_addr;
+	uint8_t		hw_addr[ETH_ALEN];
+	uint16_t	vlan_id;
 	bool		resolved;
 };
 

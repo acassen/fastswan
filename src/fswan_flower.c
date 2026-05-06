@@ -211,6 +211,18 @@ flower_rule_init_from_policy(struct fswan_flower_rule *r, uint32_t handle,
 }
 
 static void
+flower_log_installed(const struct interface *iface,
+		     const struct fswan_flower_rule *r)
+{
+	log_message(LOG_INFO, "flower: flower-xfrm: adding XFRM-Policy="
+			      "{src:%u.%u.%u.%u/%d, dst:%u.%u.%u.%u/%d,"
+			      " ifindex:%d, dir:out, vlan:%u, handle:0x%x}"
+			    , NIPQUAD(r->saddr), r->prefixlen_s
+			    , NIPQUAD(r->daddr), r->prefixlen_d
+			    , iface->ifindex, r->vlan_id, r->handle);
+}
+
+static void
 flower_rule_to_sel(const struct fswan_flower_rule *r,
 		   struct fswan_flower_sel *sel)
 {
@@ -233,14 +245,11 @@ flower_policy_add(struct interface *iface, struct xfrm_policy *p)
 	uint32_t handle;
 	int err;
 
-	if (flower_rule_find(iface, p)) {
-		log_message(LOG_INFO, "flower: %s: duplicate policy"
-				      " src:%u.%u.%u.%u/%d dst:%u.%u.%u.%u/%d"
-				    , iface->ifname
-				    , NIPQUAD(p->saddr.a4), p->prefixlen_s
-				    , NIPQUAD(p->daddr.a4), p->prefixlen_d);
-		return -1;
-	}
+	/* a NEWPOLICY arriving via load-existing-xfrm-policy after
+	 * furious-mode already replayed it on this iface is expected.
+	 */
+	if (flower_rule_find(iface, p))
+		return 0;
 
 	if (flower_egress_resolve(iface, p, &vlan_id) < 0)
 		return -1;
@@ -268,13 +277,7 @@ flower_policy_add(struct interface *iface, struct xfrm_policy *p)
 	}
 
 	rb_add(&r->node, &iface->flower->rules, flower_rule_less);
-	log_message(LOG_INFO, "flower: %s: installed policy"
-			      " src:%u.%u.%u.%u/%d dst:%u.%u.%u.%u/%d"
-			      " vlan:%u handle:0x%x"
-			    , iface->ifname
-			    , NIPQUAD(p->saddr.a4), p->prefixlen_s
-			    , NIPQUAD(p->daddr.a4), p->prefixlen_d
-			    , vlan_id, handle);
+	flower_log_installed(iface, r);
 	return 0;
 }
 
@@ -353,6 +356,7 @@ flower_replay_install_done(int err, void *ctx)
 	} else {
 		rb_add(&pi->r->node, &pi->iface->flower->rules,
 		       flower_rule_less);
+		flower_log_installed(pi->iface, pi->r);
 		pi->state->succeeded++;
 	}
 	FREE(pi);

@@ -1147,8 +1147,6 @@ DEFUN(show_ipsec_stats,
 
 /*
  *	VTY init
- *
- *	All show commands install on both VIEW_NODE and ENABLE_NODE.
  */
 static struct cmd_element *const show_cmds[] = {
 	&show_ipsec_cmd,

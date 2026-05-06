@@ -395,6 +395,12 @@ xfrm_policy_parse_show(struct nlmsghdr *n, struct xfrm_policy *p)
 	if (!(xuo->flags & XFRM_OFFLOAD_PACKET))
 		return 0;
 
+	/* Skip protocol-specific bypass policies
+	 * (e.g. IKE keep-alive sport/dport 500/4500).
+	 */
+	if (xpinfo->sel.proto)
+		return 0;
+
 	p->family = xpinfo->sel.family;
 	p->saddr = xpinfo->sel.saddr;
 	p->daddr = xpinfo->sel.daddr;
