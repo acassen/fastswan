@@ -29,6 +29,7 @@
 #include "cpu.h"
 #include "gauge.h"
 #include "ethtool.h"
+#include "fswan_data.h"
 #include "fswan_if.h"
 #include "fswan_if_ethtool.h"
 #include "fswan_if_rxq.h"
@@ -44,6 +45,22 @@ static uint64_t percpu_prev_ts_ns;
 
 /* Extern data */
 extern struct data *daemon_data;
+
+
+bool
+fswan_cpu_active(int cpu)
+{
+	if (!__test_bit(FSWAN_FL_CPU_MASK_BIT, &daemon_data->flags))
+		return true;
+	return CPU_ISSET(cpu, &daemon_data->cpu_mask);
+}
+
+/* Suppress the rate spike a freshly-activated CPU would emit on next tick. */
+void
+fswan_percpu_baseline_reset(void)
+{
+	percpu_prev_ts_ns = 0;
+}
 
 
 /*
@@ -74,7 +91,7 @@ fswan_iface_sample(struct interface *iface, void *arg)
 		struct ethtool_q_stats *s = &iface->queue_stats[q];
 
 		cpu = (q < iface->nr_rx_queues) ? cpu_per_q[q] : -1;
-		if (cpu < 0 || cpu >= cpu_load->nr_cpus)
+		if (cpu < 0 || cpu >= cpu_load->nr_cpus || !fswan_cpu_active(cpu))
 			continue;
 		ethtool_q_stats_add(&percpu_back[cpu].q_stats, s);
 	}
@@ -123,6 +140,8 @@ fswan_percpu_rates_update(uint64_t now_ns)
 	int i;
 
 	for (i = 0; i < cpu_load->nr_cpus; i++) {
+		if (!fswan_cpu_active(i))
+			continue;
 		m = &percpu_back[i];
 		q = &m->q_stats;
 		p = &m->prev_q_stats;
@@ -160,6 +179,8 @@ fswan_percpu_load_update_all(void)
 
 	cpu_load_update(cpu_load);
 	for (i = 0; i < cpu_load->nr_cpus; i++) {
+		if (!fswan_cpu_active(i))
+			continue;
 		m = &percpu_back[i];
 
 		load = cpu_load_get(cpu_load, i);

@@ -22,6 +22,7 @@
  */
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "ethtool.h"
 #include "gauge.h"
@@ -63,4 +64,6 @@ void fswan_percpu_sample_all(uint64_t now_ns);
 void fswan_percpu_rates_update(uint64_t now_ns);
 void fswan_percpu_load_update_all(void);
 void fswan_percpu_publish(void);
+void fswan_percpu_baseline_reset(void);
+bool fswan_cpu_active(int cpu);
 const struct fswan_percpu_metrics *fswan_percpu_metrics_get(int cpu);

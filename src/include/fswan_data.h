@@ -22,6 +22,7 @@
  */
 #pragma once
 
+#include <sched.h>
 #include "list_head.h"
 
 /* Default values */
@@ -34,6 +35,7 @@ enum daemon_flags {
 	FSWAN_FL_STOP_BIT,
 	FSWAN_FL_XFRM_KERNEL_LOADED_BIT,
 	FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT,
+	FSWAN_FL_CPU_MASK_BIT,
 };
 
 /* Main control block */
@@ -41,6 +43,8 @@ struct data {
 	struct list_head	bpf_progs;
 	struct list_head	interfaces;
 	unsigned		nl_rcvbuf_size;
+
+	cpu_set_t		cpu_mask;
 
 	unsigned long		flags;
 };

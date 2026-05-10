@@ -22,16 +22,20 @@
  */
 
 #include <stdio.h>
+#include <string.h>
+#include "bitops.h"
 #include "command.h"
 #include "cpu.h"
 #include "vty.h"
 #include "vty_gauge.h"
 #include "vty_matrix.h"
+#include "fswan_data.h"
 #include "fswan_cpu.h"
 #include "fswan_cpu_vty.h"
 
 /* Extern data */
 extern struct cpu_load *cpu_load;
+extern struct data *daemon_data;
 
 
 /*
@@ -49,6 +53,8 @@ fswan_cpu_list_gauge(struct vty *vty, const char *list)
 
 	cpulist_to_set(list, &set);
 	cpuset_for_each(cpu, set, cpu_load->nr_cpus) {
+		if (!fswan_cpu_active(cpu))
+			continue;
 		m = fswan_percpu_metrics_get(cpu);
 		if (!m)
 			continue;
@@ -66,6 +72,8 @@ fswan_cpu_list_collect(const char *list, struct matrix_entry *e, int max)
 
 	cpulist_to_set(list, &set);
 	cpuset_for_each(cpu, set, cpu_load->nr_cpus) {
+		if (!fswan_cpu_active(cpu))
+			continue;
 		if (n >= max)
 			break;
 		snprintf(e[n].label, sizeof(e[n].label), "cpu%-3d", cpu);
@@ -150,6 +158,71 @@ DEFUN(show_system_cpu,
 	return ret;
 }
 
+DEFUN(cpu_mask,
+      cpu_mask_cmd,
+      "cpu-mask CPULIST",
+      "Restrict daemon CPU monitoring and sampling to a subset of system CPUs\n"
+      "CPU list in cpuset format, e.g. 0-3,5,7-9\n")
+{
+	cpu_set_t set;
+	int i;
+
+	if (!cpu_load) {
+		vty_out(vty, "%% CPU monitoring not available%s", VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+
+	cpulist_to_set(argv[0], &set);
+	if (!CPU_COUNT(&set)) {
+		vty_out(vty, "%% Invalid CPU list '%s'%s", argv[0], VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+	for (i = 0; i < CPU_SETSIZE; i++) {
+		if (CPU_ISSET(i, &set) && i >= cpu_load->nr_cpus) {
+			vty_out(vty, "%% CPU %d out of range, system has %d CPUs%s"
+				   , i, cpu_load->nr_cpus, VTY_NEWLINE);
+			return CMD_WARNING;
+		}
+	}
+
+	daemon_data->cpu_mask = set;
+	__set_bit(FSWAN_FL_CPU_MASK_BIT, &daemon_data->flags);
+	fswan_percpu_baseline_reset();
+	return CMD_SUCCESS;
+}
+
+DEFUN(no_cpu_mask,
+      no_cpu_mask_cmd,
+      "no cpu-mask",
+      NO_STR
+      "Lift the CPU mask filter, every system CPU is taken into account\n")
+{
+	if (!__test_bit(FSWAN_FL_CPU_MASK_BIT, &daemon_data->flags)) {
+		vty_out(vty, "%% CPU mask not configured%s", VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+	__clear_bit(FSWAN_FL_CPU_MASK_BIT, &daemon_data->flags);
+	fswan_percpu_baseline_reset();
+	return CMD_SUCCESS;
+}
+
+
+/*
+ *	Configuration writer
+ */
+static int
+fswan_cpu_config_write(struct vty *vty)
+{
+	char list[256];
+
+	if (!__test_bit(FSWAN_FL_CPU_MASK_BIT, &daemon_data->flags))
+		return CMD_SUCCESS;
+
+	cpuset_to_cpulist(&daemon_data->cpu_mask, list, sizeof(list));
+	vty_out(vty, "cpu-mask %s%s", list, VTY_NEWLINE);
+	return CMD_SUCCESS;
+}
+
 
 /*
  *	VTY init
@@ -157,14 +230,22 @@ DEFUN(show_system_cpu,
 static int
 cmd_ext_cpu_install(void)
 {
+	install_element(CONFIG_NODE, &cpu_mask_cmd);
+	install_element(CONFIG_NODE, &no_cpu_mask_cmd);
 	install_element(VIEW_NODE, &show_system_cpu_cmd);
 	install_element(ENABLE_NODE, &show_system_cpu_cmd);
 	return 0;
 }
 
+static struct cmd_node fswan_cpu_node = {
+	.node		= CPU_SCHED_NODE,
+	.parent_node	= CONFIG_NODE,
+	.config_write	= fswan_cpu_config_write,
+};
+
 static struct cmd_ext cmd_ext_cpu = {
-	.node = NULL,
-	.install = cmd_ext_cpu_install,
+	.node		= &fswan_cpu_node,
+	.install	= cmd_ext_cpu_install,
 };
 
 static void __attribute__((constructor))

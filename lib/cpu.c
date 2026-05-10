@@ -35,6 +35,7 @@
 
 #include "cpu.h"
 #include "timer.h"
+#include "utils.h"
 #include "logger.h"
 
 /* perf read layout when PERF_FORMAT_TOTAL_TIME_ENABLED is set */
@@ -399,6 +400,42 @@ cpulist_count(const char *cpulist)
 
 	cpulist_to_set(cpulist, &set);
 	return CPU_COUNT(&set);
+}
+
+static int
+cpuset_run_end(const cpu_set_t *set, int from)
+{
+	int j = from;
+
+	while (j + 1 < CPU_SETSIZE && CPU_ISSET(j + 1, set))
+		j++;
+	return j;
+}
+
+/* Inverse of cpulist_to_set, emits canonical form. */
+size_t
+cpuset_to_cpulist(const cpu_set_t *set, char *buf, size_t bufsz)
+{
+	const char *sep = "";
+	size_t off = 0;
+	int i, j;
+
+	if (!bufsz)
+		return 0;
+	buf[0] = '\0';
+
+	for (i = 0; i < CPU_SETSIZE; i++) {
+		if (!CPU_ISSET(i, set))
+			continue;
+		j = cpuset_run_end(set, i);
+		if (i == j)
+			off += scnprintf(buf + off, bufsz - off, "%s%d", sep, i);
+		else
+			off += scnprintf(buf + off, bufsz - off, "%s%d-%d", sep, i, j);
+		sep = ",";
+		i = j;
+	}
+	return off;
 }
 
 bool
