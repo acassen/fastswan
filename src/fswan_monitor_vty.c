@@ -32,6 +32,8 @@
 #include "timer.h"
 #include "buffer.h"
 #include "fswan_cpu_vty.h"
+#include "fswan_if.h"
+#include "fswan_if_vty.h"
 
 /* Extern data */
 extern struct thread_master *master;
@@ -210,18 +212,24 @@ DEFUN(monitor_system_cpu_matrix_style,
 				   matrix_gauge_opts_alloc(3, gauge_style_parse(argv[1])));
 }
 
-DEFUN(monitor_interface_rxq,
-      monitor_interface_rxq_cmd,
-      "monitor <1-60> interface rx-queue",
+DEFUN(monitor_interface_dashboard,
+      monitor_interface_dashboard_cmd,
+      "monitor <1-60> interface WORD",
       "Refresh display\n"
       "Refresh interval in seconds\n"
       "Interface information\n"
-      "RX queue\n")
+      "Interface name to monitor (refresh of `show interface dashboard`)\n")
 {
-	/* TODO */
-	return CMD_SUCCESS;
-}
+	int interval;
 
+	VTY_GET_INTEGER_RANGE("interval", interval, argv[0], 1, 60);
+	if (!fswan_if_get(argv[1], false)) {
+		vty_out(vty, "%% Unknown interface '%s'%s", argv[1], VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+	return fswan_monitor_start(vty, interval, fswan_if_dashboard_vty,
+				   fswan_if_dashboard_opts_alloc(argv[1]));
+}
 
 /*
  *	VTY init
@@ -233,12 +241,12 @@ cmd_ext_monitor_install(void)
 	install_element(VIEW_NODE, &monitor_system_cpu_style_cmd);
 	install_element(VIEW_NODE, &monitor_system_cpu_matrix_cmd);
 	install_element(VIEW_NODE, &monitor_system_cpu_matrix_style_cmd);
-	install_element(VIEW_NODE, &monitor_interface_rxq_cmd);
+	install_element(VIEW_NODE, &monitor_interface_dashboard_cmd);
 	install_element(ENABLE_NODE, &monitor_system_cpu_cmd);
 	install_element(ENABLE_NODE, &monitor_system_cpu_style_cmd);
 	install_element(ENABLE_NODE, &monitor_system_cpu_matrix_cmd);
 	install_element(ENABLE_NODE, &monitor_system_cpu_matrix_style_cmd);
-	install_element(ENABLE_NODE, &monitor_interface_rxq_cmd);
+	install_element(ENABLE_NODE, &monitor_interface_dashboard_cmd);
 	return 0;
 }
 

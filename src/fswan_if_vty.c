@@ -31,11 +31,15 @@
 #include "bitops.h"
 #include "list_head.h"
 #include "vty.h"
+#include "vty_gauge.h"
+#include "vty_graph.h"
 #include "command.h"
+#include "cpu.h"
 #include "ethtool.h"
 #include "pci.h"
 #include "inet_utils.h"
 #include "fswan_data.h"
+#include "fswan_cpu.h"
 #include "fswan_if.h"
 #include "fswan_if_rxq.h"
 #include "fswan_bpf_prog.h"
@@ -43,8 +47,14 @@
 #include "fswan_flower.h"
 
 
+/* Types */
+struct dashboard_opts {
+	char ifname[IF_NAMESIZE];
+};
+
 /* Extern data */
 extern struct data *daemon_data;
+extern struct cpu_load *cpu_load;
 
 
 /*
@@ -207,6 +217,161 @@ fswan_if_vty(struct interface *iface, void *arg)
 		vty_out(vty, " bpf-program: %s%s", iface->bpf_prog->name, VTY_NEWLINE);
 	vty_out(vty, "%s", VTY_NEWLINE);
 	return 0;
+}
+
+
+/*
+ *	Dashboard helpers
+ */
+static void
+graph_bw_fmt(char *out, size_t sz, float v)
+{
+	bw_format((uint64_t)v, out, sz);
+}
+
+static void
+graph_pps_fmt(char *out, size_t sz, float v)
+{
+	pps_format((uint64_t)v, out, sz);
+}
+
+/* One rate graph, sized to the full terminal width */
+static void
+dashboard_graph(struct vty *vty, const char *title,
+		const struct gauge_history *h, float current, graph_fmt_fn fmt)
+{
+	struct graph_opts opts = {
+		.color_mode = GAUGE_COLOR_TRUE,
+		.height = 6,
+		.label_width = 10,
+		.fmt = fmt,
+		.h = h,
+	};
+	int term_w = vty->width ? : 80;
+
+	opts.width = term_w - opts.label_width - 2;
+	if (opts.width < GRAPH_DEFAULT_WIDTH)
+		opts.width = GRAPH_DEFAULT_WIDTH;
+
+	vty_graph(vty, title, current, &opts);
+	vty_out(vty, "%s", VTY_NEWLINE);
+}
+
+/* RX-queue CPU-load gauges, 2 per row, full terminal width */
+static int
+dashboard_rxq_gauges(struct vty *vty, const struct interface *iface)
+{
+	struct gauge_opts opts = {
+		.style = GAUGE_BRAILLE_GRAPH,
+		.color_mode = GAUGE_COLOR_TRUE,
+		.label_width = 9,
+		.left = "[",
+		.right = "]",
+	};
+	int term_w = vty->width ? : 80;
+	const struct fswan_percpu_metrics *m;
+	int *cpu_per_q;
+	int nrxq = (int)iface->nr_rx_queues;
+	int q, cpu, n;
+	char label[32];
+
+	/* per-gauge overhead = label_w + 2 + left + right + " 100.0%" (7);
+	 * two cells per row plus a 2-char separator */
+	opts.width = (term_w - 2 - 2 * (opts.label_width + 11)) / 2;
+	if (opts.width < 20)
+		opts.width = 20;
+
+	cpu_per_q = calloc(nrxq, sizeof(*cpu_per_q));
+	if (!cpu_per_q)
+		return 0;
+	if (fswan_if_rxq_cpu(iface, cpu_per_q, nrxq) <= 0) {
+		free(cpu_per_q);
+		return 0;
+	}
+
+	n = 0;
+	for (q = 0; q < nrxq; q++) {
+		cpu = cpu_per_q[q];
+		if (cpu < 0)
+			continue;
+		m = fswan_percpu_metrics_get(cpu);
+		if (!m)
+			continue;
+
+		if (n & 1)
+			vty_out(vty, "  ");
+
+		snprintf(label, sizeof(label), " q%-2d/c%-3d", q, cpu);
+		opts.h = &m->load_history;
+		vty_gauge_emit(vty, label, cpu_load_get(cpu_load, cpu), &opts);
+		n++;
+
+		if (!(n & 1))
+			vty_out(vty, "%s", VTY_NEWLINE);
+	}
+	if (n & 1)
+		vty_out(vty, "%s", VTY_NEWLINE);
+
+	free(cpu_per_q);
+	return n;
+}
+
+/* Render the dashboard for the iface named in vty->priv. Resolves the iface
+ * every call so a mid-monitor deletion from another vty session is reported
+ * instead of dereferencing a freed pointer. */
+int
+fswan_if_dashboard_vty(struct vty *vty)
+{
+	const struct dashboard_opts *opts = vty->priv;
+	struct interface *iface;
+
+	iface = fswan_if_get(opts->ifname, false);
+	if (!iface) {
+		vty_out(vty, "%% Interface '%s' no longer exists%s",
+			opts->ifname, VTY_NEWLINE);
+		return -1;
+	}
+
+	vty_out(vty, "Interface %s  ifindex:%d  rx_queues:%u%s%s",
+		iface->ifname, iface->ifindex, iface->nr_rx_queues,
+		VTY_NEWLINE, VTY_NEWLINE);
+
+	dashboard_graph(vty, "Bandwidth (RX)", &iface->rx.bw_history,
+			(float)iface->rx.bw_bps, graph_bw_fmt);
+	dashboard_graph(vty, "Bandwidth (TX)", &iface->tx.bw_history,
+			(float)iface->tx.bw_bps, graph_bw_fmt);
+	dashboard_graph(vty, "Packets/sec (RX)", &iface->rx.pps_history,
+			(float)iface->rx.pps, graph_pps_fmt);
+	dashboard_graph(vty, "Packets/sec (TX)", &iface->tx.pps_history,
+			(float)iface->tx.pps, graph_pps_fmt);
+
+	vty_out(vty, "RX queues  (CPU load of pinned CPU)%s", VTY_NEWLINE);
+
+	if (!cpu_load) {
+		vty_out(vty, "%% CPU monitoring not available%s", VTY_NEWLINE);
+		return 0;
+	}
+	if (!iface->nr_rx_queues) {
+		vty_out(vty, "%% Interface has no RX queues%s", VTY_NEWLINE);
+		return 0;
+	}
+	if (!dashboard_rxq_gauges(vty, iface))
+		vty_out(vty, "%% No RX queue CPU bindings available for %s%s",
+			iface->ifname, VTY_NEWLINE);
+
+	return 0;
+}
+
+/* Allocate an opts payload for the monitor refresh thread to own */
+void *
+fswan_if_dashboard_opts_alloc(const char *ifname)
+{
+	struct dashboard_opts *opts = calloc(1, sizeof(*opts));
+
+	if (!opts)
+		return NULL;
+	snprintf(opts->ifname, sizeof(opts->ifname), "%s", ifname);
+	return opts;
 }
 
 
@@ -497,6 +662,31 @@ DEFUN(show_interface_stats,
 	return CMD_SUCCESS;
 }
 
+DEFUN(show_interface_dashboard,
+      show_interface_dashboard_cmd,
+      "show interface dashboard WORD",
+      SHOW_STR
+      "Interface\n"
+      "Render a live activity dashboard for one interface: stacked rx/tx"
+      " bandwidth and pps graphs over the rate-history ring, plus per-rx-queue"
+      " CPU-load gauges for the CPU pinned to each queue's IRQ\n"
+      "Interface name\n")
+{
+	struct dashboard_opts opts;
+	int ret;
+
+	if (!fswan_if_get(argv[0], false)) {
+		vty_out(vty, "%% Unknown interface '%s'%s", argv[0], VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+
+	snprintf(opts.ifname, sizeof(opts.ifname), "%s", argv[0]);
+	vty->priv = &opts;
+	ret = fswan_if_dashboard_vty(vty);
+	vty->priv = NULL;
+	return ret ? CMD_WARNING : CMD_SUCCESS;
+}
+
 DEFUN(show_interface_rxq_topology,
       show_interface_rxq_topology_cmd,
       "show interface rx-queue topology",
@@ -598,11 +788,13 @@ cmd_ext_interface_install(void)
 	install_element(VIEW_NODE, &show_interface_cmd);
 	install_element(VIEW_NODE, &show_interface_stats_all_cmd);
 	install_element(VIEW_NODE, &show_interface_stats_cmd);
+	install_element(VIEW_NODE, &show_interface_dashboard_cmd);
 	install_element(VIEW_NODE, &show_interface_rxq_topology_cmd);
 	install_element(VIEW_NODE, &show_interface_topology_cmd);
 	install_element(ENABLE_NODE, &show_interface_cmd);
 	install_element(ENABLE_NODE, &show_interface_stats_all_cmd);
 	install_element(ENABLE_NODE, &show_interface_stats_cmd);
+	install_element(ENABLE_NODE, &show_interface_dashboard_cmd);
 	install_element(ENABLE_NODE, &show_interface_rxq_topology_cmd);
 	install_element(ENABLE_NODE, &show_interface_topology_cmd);
 
