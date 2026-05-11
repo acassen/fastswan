@@ -134,7 +134,7 @@ ratio_color(float ratio)
  *
  * Encodes U+2800+mask as a 3-byte UTF-8 sequence into out.
  */
-static void
+void
 braille_glyph(uint8_t mask, char *out)
 {
 	out[0] = '\xe2';
@@ -368,8 +368,8 @@ gauge_block_graph(struct vty *vty, const char *label, float ratio,
  */
 
 /* Dot bits for left and right columns, top to bottom. */
-static const uint8_t braille_left[4]  = { 0x01, 0x02, 0x04, 0x40 };
-static const uint8_t braille_right[4] = { 0x08, 0x10, 0x20, 0x80 };
+const uint8_t braille_left[4]  = { 0x01, 0x02, 0x04, 0x40 };
+const uint8_t braille_right[4] = { 0x08, 0x10, 0x20, 0x80 };
 
 /* Threshold for each row (fraction of full scale), top = highest. */
 static const float braille_thresh[4] = { 0.75f, 0.50f, 0.25f, 0.125f };

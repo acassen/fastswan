@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include <stdint.h>
 #include "gauge.h"
 #include "vty.h"
 
@@ -56,9 +57,6 @@ struct gauge_opts {
 	const struct gauge_history	*h;		/* history for graph styles, NULL = none */
 };
 
-/* matrix_entry is defined in vty_matrix.h; forward-declare for vty_gauge_render. */
-struct matrix_entry;
-
 /* Prototypes */
 const char *vty_ratio_color(float ratio, enum gauge_color_mode mode);
 enum gauge_style gauge_style_parse(const char *s);
@@ -67,3 +65,4 @@ void vty_gauge_emit(struct vty *vty, const char *label, float ratio,
 		    const struct gauge_opts *opts);
 void vty_gauge(struct vty *vty, const char *label, float ratio,
 	       const struct gauge_opts *opts);
+void braille_glyph(uint8_t mask, char *out);

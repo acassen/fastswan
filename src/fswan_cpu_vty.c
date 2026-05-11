@@ -22,7 +22,6 @@
  */
 
 #include <stdio.h>
-#include <string.h>
 #include "bitops.h"
 #include "command.h"
 #include "cpu.h"

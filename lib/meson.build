@@ -32,6 +32,7 @@ lib_src = files(
   'vector.c',
   'vty.c',
   'vty_gauge.c',
+  'vty_graph.c',
   'vty_matrix.c',
   'table.c',
 )
