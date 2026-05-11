@@ -323,6 +323,46 @@ DEFUN(no_monitor_cpu,
 
 
 /*
+ *	Memory locking
+ */
+DEFUN(lock_memory,
+      lock_memory_cmd,
+      "lock-memory",
+      "Lock daemon pages in RAM via mlockall, preventing swap-induced "
+      "latency spikes on the data path\n")
+{
+	if (__test_bit(FSWAN_FL_LOCK_MEMORY_BIT, &daemon_data->flags)) {
+		vty_out(vty, "%% Memory already locked%s", VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+	if (process_lock_memory() < 0) {
+		vty_out(vty, "%% Unable to lock daemon memory%s", VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+	__set_bit(FSWAN_FL_LOCK_MEMORY_BIT, &daemon_data->flags);
+	return CMD_SUCCESS;
+}
+
+DEFUN(no_lock_memory,
+      no_lock_memory_cmd,
+      "no lock-memory",
+      NO_STR
+      "Unlock daemon pages\n")
+{
+	if (!__test_bit(FSWAN_FL_LOCK_MEMORY_BIT, &daemon_data->flags)) {
+		vty_out(vty, "%% Memory not locked%s", VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+	if (process_unlock_memory() < 0) {
+		vty_out(vty, "%% Unable to unlock daemon memory%s", VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+	__clear_bit(FSWAN_FL_LOCK_MEMORY_BIT, &daemon_data->flags);
+	return CMD_SUCCESS;
+}
+
+
+/*
  *	Configuration writer
  */
 static void
@@ -345,6 +385,8 @@ fswan_cpu_config_write(struct vty *vty)
 			  &daemon_data->cpu_affinity, "daemon-cpu");
 	write_cpuset_line(vty, FSWAN_FL_MONITOR_CPU_BIT,
 			  &daemon_data->monitor_cpu_affinity, "monitor-cpu");
+	if (__test_bit(FSWAN_FL_LOCK_MEMORY_BIT, &daemon_data->flags))
+		vty_out(vty, "lock-memory%s", VTY_NEWLINE);
 	return CMD_SUCCESS;
 }
 
@@ -361,6 +403,8 @@ cmd_ext_cpu_install(void)
 	install_element(CONFIG_NODE, &no_daemon_cpu_cmd);
 	install_element(CONFIG_NODE, &monitor_cpu_cmd);
 	install_element(CONFIG_NODE, &no_monitor_cpu_cmd);
+	install_element(CONFIG_NODE, &lock_memory_cmd);
+	install_element(CONFIG_NODE, &no_lock_memory_cmd);
 	install_element(VIEW_NODE, &show_system_cpu_cmd);
 	install_element(ENABLE_NODE, &show_system_cpu_cmd);
 	return 0;

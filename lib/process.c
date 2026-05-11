@@ -53,27 +53,48 @@ bool rlimit_nofile_set;
 static struct rlimit core;
 bool rlimit_core_set;
 
+int
+process_lock_memory(void)
+{
+	if (process_locked_in_memory)
+		return 0;
+	if (mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) == -1) {
+		log_message(LOG_WARNING, "Unable to lock process in memory (%m)");
+		return -1;
+	}
+	process_locked_in_memory = true;
+	return 0;
+}
+
+int
+process_unlock_memory(void)
+{
+	if (!process_locked_in_memory)
+		return 0;
+	if (munlockall() == -1) {
+		log_message(LOG_WARNING, "Unable to unlock process memory (%m)");
+		return -1;
+	}
+	process_locked_in_memory = false;
+	return 0;
+}
+
 static void
 set_process_dont_swap(size_t stack_reserve)
 {
-	/* Ensure stack pages allocated */
-	size_t pagesize = (size_t)sysconf(_SC_PAGESIZE);
-	char stack[stack_reserve];
-	size_t i;
+	process_lock_memory();
 
-	if (mlockall(MCL_CURRENT | MCL_FUTURE
-#ifdef MCL_ONFAULT
-					      | MCL_ONFAULT	/* Since Linux 4.4 */
-#endif
-							   ) == -1)
-		log_message(LOG_INFO, "Unable to lock process in memory - %s", strerror(errno));
-	else
-		process_locked_in_memory = true;
+	/* Ensure stack pages allocated when caller asked for it */
+	if (stack_reserve) {
+		size_t pagesize = (size_t)sysconf(_SC_PAGESIZE);
+		char stack[stack_reserve];
+		size_t i;
 
-	stack[0] = 23;		/* A random number */
-	for (i = 0; i < stack_reserve; i += pagesize)
-		stack[i] = stack[0];
-	stack[stack_reserve-1] = stack[0];
+		stack[0] = 23;		/* A random number */
+		for (i = 0; i < stack_reserve; i += pagesize)
+			stack[i] = stack[0];
+		stack[stack_reserve-1] = stack[0];
+	}
 }
 
 static void
@@ -181,10 +202,7 @@ reset_process_priorities(void)
 	if (cur_priority != orig_priority)
 		reset_process_priority();
 
-	if (process_locked_in_memory) {
-		munlockall();
-		process_locked_in_memory = false;
-	}
+	process_unlock_memory();
 
 	if (rlimit_nofile_set) {
 		setrlimit(RLIMIT_NOFILE, &orig_fd_limit);

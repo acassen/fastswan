@@ -33,6 +33,8 @@
 
 extern long min_auto_priority_delay;
 
+int process_lock_memory(void);
+int process_unlock_memory(void);
 void set_process_priorities(int realtime_priority, int max_realtime_priority, long min_delay,
 			    int rlimit_rt, int process_priority, int no_swap_stack_size);
 

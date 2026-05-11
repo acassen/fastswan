@@ -38,6 +38,7 @@ enum daemon_flags {
 	FSWAN_FL_CPU_MASK_BIT,
 	FSWAN_FL_CPU_AFFINITY_BIT,
 	FSWAN_FL_MONITOR_CPU_BIT,
+	FSWAN_FL_LOCK_MEMORY_BIT,
 };
 
 /* Main control block */
