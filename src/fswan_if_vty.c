@@ -316,34 +316,54 @@ dashboard_rxq_gauges(struct vty *vty, const struct interface *iface)
 	return n;
 }
 
-/* Render the dashboard for the iface named in vty->priv. Resolves the iface
- * every call so a mid-monitor deletion from another vty session is reported
- * instead of dereferencing a freed pointer. */
-int
-fswan_if_dashboard_vty(struct vty *vty)
+/* Emit the 4-graph rate panel: BW RX, BW TX, PPS RX, PPS TX */
+static void
+dashboard_emit_graphs(struct vty *vty, const struct iface_rate *rx,
+		      const struct iface_rate *tx, const char *bw_label,
+		      const char *pps_label)
+{
+	char title[48];
+
+	snprintf(title, sizeof(title), "%s (RX)", bw_label);
+	dashboard_graph(vty, title, &rx->bw_history, (float)rx->bw_bps, graph_bw_fmt);
+	snprintf(title, sizeof(title), "%s (TX)", bw_label);
+	dashboard_graph(vty, title, &tx->bw_history, (float)tx->bw_bps, graph_bw_fmt);
+	snprintf(title, sizeof(title), "%s (RX)", pps_label);
+	dashboard_graph(vty, title, &rx->pps_history, (float)rx->pps, graph_pps_fmt);
+	snprintf(title, sizeof(title), "%s (TX)", pps_label);
+	dashboard_graph(vty, title, &tx->pps_history, (float)tx->pps, graph_pps_fmt);
+}
+
+/* Resolve the iface named in vty->priv. Looks up fresh every call so a
+ * mid-monitor deletion from another vty session is reported instead of
+ * dereferencing a freed pointer. */
+static struct interface *
+dashboard_resolve(struct vty *vty)
 {
 	const struct dashboard_opts *opts = vty->priv;
 	struct interface *iface;
 
 	iface = fswan_if_get(opts->ifname, false);
-	if (!iface) {
+	if (!iface)
 		vty_out(vty, "%% Interface '%s' no longer exists%s",
 			opts->ifname, VTY_NEWLINE);
+	return iface;
+}
+
+int
+fswan_if_dashboard_vty(struct vty *vty)
+{
+	struct interface *iface = dashboard_resolve(vty);
+
+	if (!iface)
 		return -1;
-	}
 
 	vty_out(vty, "Interface %s  ifindex:%d  rx_queues:%u%s%s",
 		iface->ifname, iface->ifindex, iface->nr_rx_queues,
 		VTY_NEWLINE, VTY_NEWLINE);
 
-	dashboard_graph(vty, "Bandwidth (RX)", &iface->rx.bw_history,
-			(float)iface->rx.bw_bps, graph_bw_fmt);
-	dashboard_graph(vty, "Bandwidth (TX)", &iface->tx.bw_history,
-			(float)iface->tx.bw_bps, graph_bw_fmt);
-	dashboard_graph(vty, "Packets/sec (RX)", &iface->rx.pps_history,
-			(float)iface->rx.pps, graph_pps_fmt);
-	dashboard_graph(vty, "Packets/sec (TX)", &iface->tx.pps_history,
-			(float)iface->tx.pps, graph_pps_fmt);
+	dashboard_emit_graphs(vty, &iface->rx, &iface->tx,
+			      "Bandwidth", "Packets/sec");
 
 	vty_out(vty, "RX queues  (CPU load of pinned CPU)%s", VTY_NEWLINE);
 
@@ -359,6 +379,28 @@ fswan_if_dashboard_vty(struct vty *vty)
 		vty_out(vty, "%% No RX queue CPU bindings available for %s%s",
 			iface->ifname, VTY_NEWLINE);
 
+	return 0;
+}
+
+int
+fswan_if_ipsec_vty(struct vty *vty)
+{
+	struct interface *iface = dashboard_resolve(vty);
+
+	if (!iface)
+		return -1;
+
+	if (!iface->ethtool_cache || !iface->ethtool_cache->n_ipsec) {
+		vty_out(vty, "%% No IPsec offload counters for '%s'%s",
+			iface->ifname, VTY_NEWLINE);
+		return -1;
+	}
+
+	vty_out(vty, "Interface %s  ifindex:%d  IPsec offload%s%s",
+		iface->ifname, iface->ifindex, VTY_NEWLINE, VTY_NEWLINE);
+
+	dashboard_emit_graphs(vty, &iface->ipsec_rx, &iface->ipsec_tx,
+			      "IPsec Bandwidth", "IPsec Packets/sec");
 	return 0;
 }
 
@@ -687,6 +729,30 @@ DEFUN(show_interface_dashboard,
 	return ret ? CMD_WARNING : CMD_SUCCESS;
 }
 
+DEFUN(show_interface_ipsec,
+      show_interface_ipsec_cmd,
+      "show interface ipsec WORD",
+      SHOW_STR
+      "Interface\n"
+      "Render IPsec offload activity for one interface: stacked rx/tx"
+      " bandwidth and pps graphs over the IPsec rate-history ring\n"
+      "Interface name\n")
+{
+	struct dashboard_opts opts;
+	int ret;
+
+	if (!fswan_if_get(argv[0], false)) {
+		vty_out(vty, "%% Unknown interface '%s'%s", argv[0], VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+
+	snprintf(opts.ifname, sizeof(opts.ifname), "%s", argv[0]);
+	vty->priv = &opts;
+	ret = fswan_if_ipsec_vty(vty);
+	vty->priv = NULL;
+	return ret ? CMD_WARNING : CMD_SUCCESS;
+}
+
 DEFUN(show_interface_rxq_topology,
       show_interface_rxq_topology_cmd,
       "show interface rx-queue topology",
@@ -789,12 +855,14 @@ cmd_ext_interface_install(void)
 	install_element(VIEW_NODE, &show_interface_stats_all_cmd);
 	install_element(VIEW_NODE, &show_interface_stats_cmd);
 	install_element(VIEW_NODE, &show_interface_dashboard_cmd);
+	install_element(VIEW_NODE, &show_interface_ipsec_cmd);
 	install_element(VIEW_NODE, &show_interface_rxq_topology_cmd);
 	install_element(VIEW_NODE, &show_interface_topology_cmd);
 	install_element(ENABLE_NODE, &show_interface_cmd);
 	install_element(ENABLE_NODE, &show_interface_stats_all_cmd);
 	install_element(ENABLE_NODE, &show_interface_stats_cmd);
 	install_element(ENABLE_NODE, &show_interface_dashboard_cmd);
+	install_element(ENABLE_NODE, &show_interface_ipsec_cmd);
 	install_element(ENABLE_NODE, &show_interface_rxq_topology_cmd);
 	install_element(ENABLE_NODE, &show_interface_topology_cmd);
 

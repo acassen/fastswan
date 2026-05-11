@@ -231,6 +231,27 @@ DEFUN(monitor_interface_dashboard,
 				   fswan_if_dashboard_opts_alloc(argv[1]));
 }
 
+DEFUN(monitor_interface_ipsec,
+      monitor_interface_ipsec_cmd,
+      "monitor <1-60> interface ipsec WORD",
+      "Refresh display\n"
+      "Refresh interval in seconds\n"
+      "Interface information\n"
+      "IPsec offload counters\n"
+      "Interface name to monitor (refresh of `show interface ipsec`)\n")
+{
+	int interval;
+
+	VTY_GET_INTEGER_RANGE("interval", interval, argv[0], 1, 60);
+	if (!fswan_if_get(argv[1], false)) {
+		vty_out(vty, "%% Unknown interface '%s'%s", argv[1], VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+	return fswan_monitor_start(vty, interval, fswan_if_ipsec_vty,
+				   fswan_if_dashboard_opts_alloc(argv[1]));
+}
+
+
 /*
  *	VTY init
  */
@@ -242,11 +263,13 @@ cmd_ext_monitor_install(void)
 	install_element(VIEW_NODE, &monitor_system_cpu_matrix_cmd);
 	install_element(VIEW_NODE, &monitor_system_cpu_matrix_style_cmd);
 	install_element(VIEW_NODE, &monitor_interface_dashboard_cmd);
+	install_element(VIEW_NODE, &monitor_interface_ipsec_cmd);
 	install_element(ENABLE_NODE, &monitor_system_cpu_cmd);
 	install_element(ENABLE_NODE, &monitor_system_cpu_style_cmd);
 	install_element(ENABLE_NODE, &monitor_system_cpu_matrix_cmd);
 	install_element(ENABLE_NODE, &monitor_system_cpu_matrix_style_cmd);
 	install_element(ENABLE_NODE, &monitor_interface_dashboard_cmd);
+	install_element(ENABLE_NODE, &monitor_interface_ipsec_cmd);
 	return 0;
 }
 
