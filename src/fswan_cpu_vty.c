@@ -160,7 +160,7 @@ DEFUN(show_system_cpu,
 }
 
 /*
- *	CPULIST parser shared by cpu-mask / daemon-cpu / monitor-cpu
+ *	CPULIST helpers
  */
 static void
 cpu_all_set(cpu_set_t *set)
@@ -192,9 +192,12 @@ parse_cpulist(struct vty *vty, const char *list, cpu_set_t *set)
 	return 0;
 }
 
+
 /*
- *	Effective monitor pthread set: explicit monitor-cpu, else daemon-cpu,
- *	else system default. Re-applied after any of these change.
+ *	Monitor pthread re-apply helpers
+ *
+ *	Effective value is explicit monitor-*, else daemon-* inheritance,
+ *	else the system default. Called after any of the four bits change.
  */
 static void
 apply_monitor_affinity(void)
@@ -208,6 +211,18 @@ apply_monitor_affinity(void)
 	else
 		cpu_all_set(&set);
 	fswan_monitor_set_cpu_affinity(&set);
+}
+
+static void
+apply_monitor_priority(void)
+{
+	int prio = 0;
+
+	if (__test_bit(FSWAN_FL_MONITOR_RT_PRIORITY_BIT, &daemon_data->flags))
+		prio = daemon_data->monitor_rt_priority;
+	else if (__test_bit(FSWAN_FL_RT_PRIORITY_BIT, &daemon_data->flags))
+		prio = daemon_data->rt_priority;
+	fswan_monitor_set_rt_priority(prio);
 }
 
 DEFUN(cpu_mask,
@@ -363,6 +378,75 @@ DEFUN(no_lock_memory,
 
 
 /*
+ *	Realtime priority (SCHED_RR for daemon + monitor pthread)
+ */
+DEFUN(daemon_priority,
+      daemon_priority_cmd,
+      "daemon-priority <1-99>",
+      "Set daemon main thread to SCHED_RR with given priority, inherited by "
+      "the monitor pthread unless overridden via monitor-priority\n"
+      "SCHED_RR priority\n")
+{
+	int prio;
+
+	VTY_GET_INTEGER_RANGE("priority", prio, argv[0], 1, 99);
+
+	daemon_data->rt_priority = prio;
+	__set_bit(FSWAN_FL_RT_PRIORITY_BIT, &daemon_data->flags);
+	set_process_rt_priority(prio);
+	apply_monitor_priority();
+	return CMD_SUCCESS;
+}
+
+DEFUN(no_daemon_priority,
+      no_daemon_priority_cmd,
+      "no daemon-priority",
+      NO_STR
+      "Reset daemon main thread to SCHED_OTHER\n")
+{
+	if (!__test_bit(FSWAN_FL_RT_PRIORITY_BIT, &daemon_data->flags)) {
+		vty_out(vty, "%% Daemon priority not configured%s", VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+	__clear_bit(FSWAN_FL_RT_PRIORITY_BIT, &daemon_data->flags);
+	set_process_rt_priority(0);
+	apply_monitor_priority();
+	return CMD_SUCCESS;
+}
+
+DEFUN(monitor_priority,
+      monitor_priority_cmd,
+      "monitor-priority <1-99>",
+      "Set monitor pthread to SCHED_RR with given priority\n"
+      "SCHED_RR priority\n")
+{
+	int prio;
+
+	VTY_GET_INTEGER_RANGE("priority", prio, argv[0], 1, 99);
+
+	daemon_data->monitor_rt_priority = prio;
+	__set_bit(FSWAN_FL_MONITOR_RT_PRIORITY_BIT, &daemon_data->flags);
+	apply_monitor_priority();
+	return CMD_SUCCESS;
+}
+
+DEFUN(no_monitor_priority,
+      no_monitor_priority_cmd,
+      "no monitor-priority",
+      NO_STR
+      "Reset monitor pthread priority, falling back to daemon-priority if configured\n")
+{
+	if (!__test_bit(FSWAN_FL_MONITOR_RT_PRIORITY_BIT, &daemon_data->flags)) {
+		vty_out(vty, "%% Monitor priority not configured%s", VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+	__clear_bit(FSWAN_FL_MONITOR_RT_PRIORITY_BIT, &daemon_data->flags);
+	apply_monitor_priority();
+	return CMD_SUCCESS;
+}
+
+
+/*
  *	Configuration writer
  */
 static void
@@ -387,6 +471,12 @@ fswan_cpu_config_write(struct vty *vty)
 			  &daemon_data->monitor_cpu_affinity, "monitor-cpu");
 	if (__test_bit(FSWAN_FL_LOCK_MEMORY_BIT, &daemon_data->flags))
 		vty_out(vty, "lock-memory%s", VTY_NEWLINE);
+	if (__test_bit(FSWAN_FL_RT_PRIORITY_BIT, &daemon_data->flags))
+		vty_out(vty, "daemon-priority %d%s",
+			daemon_data->rt_priority, VTY_NEWLINE);
+	if (__test_bit(FSWAN_FL_MONITOR_RT_PRIORITY_BIT, &daemon_data->flags))
+		vty_out(vty, "monitor-priority %d%s",
+			daemon_data->monitor_rt_priority, VTY_NEWLINE);
 	return CMD_SUCCESS;
 }
 
@@ -405,6 +495,10 @@ cmd_ext_cpu_install(void)
 	install_element(CONFIG_NODE, &no_monitor_cpu_cmd);
 	install_element(CONFIG_NODE, &lock_memory_cmd);
 	install_element(CONFIG_NODE, &no_lock_memory_cmd);
+	install_element(CONFIG_NODE, &daemon_priority_cmd);
+	install_element(CONFIG_NODE, &no_daemon_priority_cmd);
+	install_element(CONFIG_NODE, &monitor_priority_cmd);
+	install_element(CONFIG_NODE, &no_monitor_priority_cmd);
 	install_element(VIEW_NODE, &show_system_cpu_cmd);
 	install_element(ENABLE_NODE, &show_system_cpu_cmd);
 	return 0;

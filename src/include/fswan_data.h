@@ -39,6 +39,8 @@ enum daemon_flags {
 	FSWAN_FL_CPU_AFFINITY_BIT,
 	FSWAN_FL_MONITOR_CPU_BIT,
 	FSWAN_FL_LOCK_MEMORY_BIT,
+	FSWAN_FL_RT_PRIORITY_BIT,
+	FSWAN_FL_MONITOR_RT_PRIORITY_BIT,
 };
 
 /* Main control block */
@@ -50,6 +52,8 @@ struct data {
 	cpu_set_t		cpu_mask;
 	cpu_set_t		cpu_affinity;
 	cpu_set_t		monitor_cpu_affinity;
+	int			rt_priority;
+	int			monitor_rt_priority;
 
 	unsigned long		flags;
 };

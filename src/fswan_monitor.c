@@ -22,6 +22,7 @@
  */
 
 #include <time.h>
+#include <string.h>
 #include <unistd.h>
 #include <pthread.h>
 #include "logger.h"
@@ -105,6 +106,25 @@ fswan_monitor_set_cpu_affinity(const cpu_set_t *set)
 	if (pthread_setaffinity_np(poll_thread, sizeof(*set), set)) {
 		log_message(LOG_WARNING, "%s(): unable to set monitor pthread affinity (%m)"
 				       , __FUNCTION__);
+		return -1;
+	}
+	return 0;
+}
+
+/* prio > 0: SCHED_RR with given priority. prio == 0: lift RT, back to SCHED_OTHER */
+int
+fswan_monitor_set_rt_priority(int prio)
+{
+	struct sched_param sp = { .sched_priority = prio };
+	int policy = prio ? SCHED_RR : SCHED_OTHER;
+	int err;
+
+	if (!poll_thread_running)
+		return 0;
+	err = pthread_setschedparam(poll_thread, policy, &sp);
+	if (err) {
+		log_message(LOG_WARNING, "%s(): unable to set monitor pthread RT priority (%s)"
+				       , __FUNCTION__, strerror(err));
 		return -1;
 	}
 	return 0;

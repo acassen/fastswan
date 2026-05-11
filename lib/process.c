@@ -247,6 +247,20 @@ get_cur_rlimit_rttime(void)
 	return cur_rlimit_rttime;
 }
 
+/* prio > 0: SCHED_RR with given priority. prio == 0: lift RT, back to SCHED_OTHER */
+int
+set_process_rt_priority(int prio)
+{
+	struct sched_param sp = { .sched_priority = prio };
+	int policy = prio ? SCHED_RR : SCHED_OTHER;
+
+	if (sched_setscheduler(0, policy, &sp) == -1) {
+		log_message(LOG_WARNING, "Unable to set process RT priority (%m)");
+		return -1;
+	}
+	return 0;
+}
+
 int
 set_process_cpu_affinity(cpu_set_t *set, const char *process)
 {
