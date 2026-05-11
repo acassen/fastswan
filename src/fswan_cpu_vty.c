@@ -25,12 +25,14 @@
 #include "bitops.h"
 #include "command.h"
 #include "cpu.h"
+#include "process.h"
 #include "vty.h"
 #include "vty_gauge.h"
 #include "vty_matrix.h"
 #include "fswan_data.h"
 #include "fswan_cpu.h"
 #include "fswan_cpu_vty.h"
+#include "fswan_monitor.h"
 
 /* Extern data */
 extern struct cpu_load *cpu_load;
@@ -157,6 +159,57 @@ DEFUN(show_system_cpu,
 	return ret;
 }
 
+/*
+ *	CPULIST parser shared by cpu-mask / daemon-cpu / monitor-cpu
+ */
+static void
+cpu_all_set(cpu_set_t *set)
+{
+	int i, nr = cpu_nr_possible();
+
+	CPU_ZERO(set);
+	for (i = 0; i < nr; i++)
+		CPU_SET(i, set);
+}
+
+static int
+parse_cpulist(struct vty *vty, const char *list, cpu_set_t *set)
+{
+	int i, nr = cpu_nr_possible();
+
+	cpulist_to_set(list, set);
+	if (!CPU_COUNT(set)) {
+		vty_out(vty, "%% Invalid CPU list '%s'%s", list, VTY_NEWLINE);
+		return -1;
+	}
+	for (i = nr; i < CPU_SETSIZE; i++) {
+		if (!CPU_ISSET(i, set))
+			continue;
+		vty_out(vty, "%% CPU %d out of range, system has %d CPUs%s"
+			   , i, nr, VTY_NEWLINE);
+		return -1;
+	}
+	return 0;
+}
+
+/*
+ *	Effective monitor pthread set: explicit monitor-cpu, else daemon-cpu,
+ *	else system default. Re-applied after any of these change.
+ */
+static void
+apply_monitor_affinity(void)
+{
+	cpu_set_t set;
+
+	if (__test_bit(FSWAN_FL_MONITOR_CPU_BIT, &daemon_data->flags))
+		set = daemon_data->monitor_cpu_affinity;
+	else if (__test_bit(FSWAN_FL_CPU_AFFINITY_BIT, &daemon_data->flags))
+		set = daemon_data->cpu_affinity;
+	else
+		cpu_all_set(&set);
+	fswan_monitor_set_cpu_affinity(&set);
+}
+
 DEFUN(cpu_mask,
       cpu_mask_cmd,
       "cpu-mask CPULIST",
@@ -164,25 +217,13 @@ DEFUN(cpu_mask,
       "CPU list in cpuset format, e.g. 0-3,5,7-9\n")
 {
 	cpu_set_t set;
-	int i;
 
 	if (!cpu_load) {
 		vty_out(vty, "%% CPU monitoring not available%s", VTY_NEWLINE);
 		return CMD_WARNING;
 	}
-
-	cpulist_to_set(argv[0], &set);
-	if (!CPU_COUNT(&set)) {
-		vty_out(vty, "%% Invalid CPU list '%s'%s", argv[0], VTY_NEWLINE);
+	if (parse_cpulist(vty, argv[0], &set) < 0)
 		return CMD_WARNING;
-	}
-	for (i = 0; i < CPU_SETSIZE; i++) {
-		if (CPU_ISSET(i, &set) && i >= cpu_load->nr_cpus) {
-			vty_out(vty, "%% CPU %d out of range, system has %d CPUs%s"
-				   , i, cpu_load->nr_cpus, VTY_NEWLINE);
-			return CMD_WARNING;
-		}
-	}
 
 	daemon_data->cpu_mask = set;
 	__set_bit(FSWAN_FL_CPU_MASK_BIT, &daemon_data->flags);
@@ -207,18 +248,103 @@ DEFUN(no_cpu_mask,
 
 
 /*
+ *	CPU affinity (pin daemon + monitor pthread)
+ */
+DEFUN(daemon_cpu,
+      daemon_cpu_cmd,
+      "daemon-cpu CPULIST",
+      "Pin the daemon main thread to a CPU set, inherited by the monitor pthread "
+      "unless overridden via monitor-cpu\n"
+      "CPU list in cpuset format, e.g. 0-3,5,7-9\n")
+{
+	cpu_set_t set;
+
+	if (parse_cpulist(vty, argv[0], &set) < 0)
+		return CMD_WARNING;
+
+	daemon_data->cpu_affinity = set;
+	__set_bit(FSWAN_FL_CPU_AFFINITY_BIT, &daemon_data->flags);
+	set_process_cpu_affinity(&set, "daemon");
+	apply_monitor_affinity();
+	return CMD_SUCCESS;
+}
+
+DEFUN(no_daemon_cpu,
+      no_daemon_cpu_cmd,
+      "no daemon-cpu",
+      NO_STR
+      "Lift daemon CPU pinning\n")
+{
+	cpu_set_t set;
+
+	if (!__test_bit(FSWAN_FL_CPU_AFFINITY_BIT, &daemon_data->flags)) {
+		vty_out(vty, "%% Daemon CPU affinity not configured%s", VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+	__clear_bit(FSWAN_FL_CPU_AFFINITY_BIT, &daemon_data->flags);
+
+	cpu_all_set(&set);
+	set_process_cpu_affinity(&set, "daemon");
+	apply_monitor_affinity();
+	return CMD_SUCCESS;
+}
+
+DEFUN(monitor_cpu,
+      monitor_cpu_cmd,
+      "monitor-cpu CPULIST",
+      "Pin the monitor pthread to a CPU set\n"
+      "CPU list in cpuset format, e.g. 0-3,5,7-9\n")
+{
+	cpu_set_t set;
+
+	if (parse_cpulist(vty, argv[0], &set) < 0)
+		return CMD_WARNING;
+
+	daemon_data->monitor_cpu_affinity = set;
+	__set_bit(FSWAN_FL_MONITOR_CPU_BIT, &daemon_data->flags);
+	apply_monitor_affinity();
+	return CMD_SUCCESS;
+}
+
+DEFUN(no_monitor_cpu,
+      no_monitor_cpu_cmd,
+      "no monitor-cpu",
+      NO_STR
+      "Lift monitor pthread CPU pinning, falling back to daemon-cpu if configured\n")
+{
+	if (!__test_bit(FSWAN_FL_MONITOR_CPU_BIT, &daemon_data->flags)) {
+		vty_out(vty, "%% Monitor CPU affinity not configured%s", VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+	__clear_bit(FSWAN_FL_MONITOR_CPU_BIT, &daemon_data->flags);
+	apply_monitor_affinity();
+	return CMD_SUCCESS;
+}
+
+
+/*
  *	Configuration writer
  */
-static int
-fswan_cpu_config_write(struct vty *vty)
+static void
+write_cpuset_line(struct vty *vty, int bit, const cpu_set_t *set, const char *keyword)
 {
 	char list[256];
 
-	if (!__test_bit(FSWAN_FL_CPU_MASK_BIT, &daemon_data->flags))
-		return CMD_SUCCESS;
+	if (!__test_bit(bit, &daemon_data->flags))
+		return;
+	cpuset_to_cpulist(set, list, sizeof(list));
+	vty_out(vty, "%s %s%s", keyword, list, VTY_NEWLINE);
+}
 
-	cpuset_to_cpulist(&daemon_data->cpu_mask, list, sizeof(list));
-	vty_out(vty, "cpu-mask %s%s", list, VTY_NEWLINE);
+static int
+fswan_cpu_config_write(struct vty *vty)
+{
+	write_cpuset_line(vty, FSWAN_FL_CPU_MASK_BIT,
+			  &daemon_data->cpu_mask, "cpu-mask");
+	write_cpuset_line(vty, FSWAN_FL_CPU_AFFINITY_BIT,
+			  &daemon_data->cpu_affinity, "daemon-cpu");
+	write_cpuset_line(vty, FSWAN_FL_MONITOR_CPU_BIT,
+			  &daemon_data->monitor_cpu_affinity, "monitor-cpu");
 	return CMD_SUCCESS;
 }
 
@@ -231,6 +357,10 @@ cmd_ext_cpu_install(void)
 {
 	install_element(CONFIG_NODE, &cpu_mask_cmd);
 	install_element(CONFIG_NODE, &no_cpu_mask_cmd);
+	install_element(CONFIG_NODE, &daemon_cpu_cmd);
+	install_element(CONFIG_NODE, &no_daemon_cpu_cmd);
+	install_element(CONFIG_NODE, &monitor_cpu_cmd);
+	install_element(CONFIG_NODE, &no_monitor_cpu_cmd);
 	install_element(VIEW_NODE, &show_system_cpu_cmd);
 	install_element(ENABLE_NODE, &show_system_cpu_cmd);
 	return 0;

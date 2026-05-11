@@ -95,6 +95,23 @@ fswan_monitor_poll_thread(__attribute__((unused)) void *arg)
 
 
 /*
+ *	Pin the poll thread to a CPU set
+ */
+int
+fswan_monitor_set_cpu_affinity(const cpu_set_t *set)
+{
+	if (!poll_thread_running)
+		return 0;
+	if (pthread_setaffinity_np(poll_thread, sizeof(*set), set)) {
+		log_message(LOG_WARNING, "%s(): unable to set monitor pthread affinity (%m)"
+				       , __FUNCTION__);
+		return -1;
+	}
+	return 0;
+}
+
+
+/*
  *	Init / destroy
  */
 int

@@ -36,6 +36,8 @@ enum daemon_flags {
 	FSWAN_FL_XFRM_KERNEL_LOADED_BIT,
 	FSWAN_FL_XDP_XFRM_DISABLE_STATS_BIT,
 	FSWAN_FL_CPU_MASK_BIT,
+	FSWAN_FL_CPU_AFFINITY_BIT,
+	FSWAN_FL_MONITOR_CPU_BIT,
 };
 
 /* Main control block */
@@ -45,6 +47,8 @@ struct data {
 	unsigned		nl_rcvbuf_size;
 
 	cpu_set_t		cpu_mask;
+	cpu_set_t		cpu_affinity;
+	cpu_set_t		monitor_cpu_affinity;
 
 	unsigned long		flags;
 };

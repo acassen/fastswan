@@ -22,7 +22,10 @@
  */
 #pragma once
 
+#include <sched.h>
+
 /* Prototypes */
 int fswan_monitor_init(void);
 int fswan_monitor_destroy(void);
 void fswan_monitor_iface_quiesce(void);
+int fswan_monitor_set_cpu_affinity(const cpu_set_t *set);
