@@ -275,6 +275,7 @@ fswan_bpf_prog_attach(struct fswan_bpf_prog *p, struct interface *iface)
 
 	fswan_hairpin_seed(iface);
 	fswan_bpf_iface_topo_seed(p);
+	fswan_bpf_redirect_seed(p);
 
 	__set_bit(FSWAN_INTERFACE_FL_RUNNING_BIT, &iface->flags);
 	log_message(LOG_INFO, "bpf-program '%s': attached to %s (ifindex:%d)"

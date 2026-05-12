@@ -117,14 +117,14 @@ fswan_hairpin_build(struct hairpin_nexthop *nh, struct interface *iface,
 	p += ETH_ALEN;
 	memcpy(p, iface->hw_addr, ETH_ALEN);
 	p += ETH_ALEN;
-	nh->hdr_len = ETH_HLEN;
+	nh->flags = HAIRPIN_FL_VALID;
 
 	if (vlan_id) {
 		*(uint16_t *) p = htons(ETH_P_8021Q);
 		p += 2;
 		*(uint16_t *) p = htons(vlan_id & 0x0fff);
 		p += 2;
-		nh->hdr_len += 4;
+		nh->flags |= HAIRPIN_FL_TAGGED;
 	}
 
 	*(uint16_t *) p = htons(ETH_P_IP);

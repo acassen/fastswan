@@ -35,13 +35,6 @@ struct _vlan_hdr {
 	__be16	h_vlan_encapsulated_proto;
 };
 
-struct parse_pkt {
-	struct xdp_md	*ctx;
-	__u16	vlan_id;
-	__u16   l3_proto;
-	__u16   l3_offset;
-};
-
 /* Two-stage LPM matching.
  *
  * Stage 1: dst_lpm maps a dst prefix to a fixed 32-bit dst_id token.
@@ -79,8 +72,11 @@ struct xfrm_policy_stats {
 #define HAIRPIN_CACHELINE	64
 #define HAIRPIN_MAP_MAX_ENTRIES	1024
 
+#define HAIRPIN_FL_VALID	(1 << 0)
+#define HAIRPIN_FL_TAGGED	(1 << 1)
+
 struct hairpin_nexthop {
-	__u8	hdr_len;
+	__u8	flags;
 	__u8	reformat[HAIRPIN_REFORMAT_MAX];
 	__u8	_pad[HAIRPIN_CACHELINE - 1 - HAIRPIN_REFORMAT_MAX];
 } __attribute__ ((aligned(HAIRPIN_CACHELINE)));

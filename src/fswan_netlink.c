@@ -447,6 +447,7 @@ netlink_if_link_filter(__attribute__((unused)) struct sockaddr_nl *snl,
 	netlink_if_link_l2(iface, tb);
 	netlink_if_link_master(iface, tb);
 	fswan_bpf_iface_topo_publish(iface);
+	fswan_bpf_redirect_publish(iface);
 	return 0;
 }
 

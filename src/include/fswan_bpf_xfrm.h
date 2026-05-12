@@ -38,6 +38,7 @@ enum {
 	FSWAN_BPF_MAP_POLICY_STATS_ARRAY,
 	FSWAN_BPF_MAP_HAIRPIN,
 	FSWAN_BPF_MAP_IFACE_TOPO,
+	FSWAN_BPF_MAP_REDIRECT,
 	FSWAN_BPF_MAP_CNT
 };
 
@@ -74,8 +75,11 @@ struct xfrm_policy_stats {
 #define HAIRPIN_CACHELINE	64
 #define HAIRPIN_MAP_MAX_ENTRIES	1024
 
+#define HAIRPIN_FL_VALID	(1 << 0)
+#define HAIRPIN_FL_TAGGED	(1 << 1)
+
 struct hairpin_nexthop {
-	__u8	hdr_len;
+	__u8	flags;
 	__u8	reformat[HAIRPIN_REFORMAT_MAX];
 	__u8	_pad[HAIRPIN_CACHELINE - 1 - HAIRPIN_REFORMAT_MAX];
 } __attribute__ ((aligned(HAIRPIN_CACHELINE)));
@@ -105,3 +109,5 @@ int fswan_bpf_xfrm_map_load(struct fswan_bpf_prog *p);
 int fswan_bpf_xfrm_action(int, struct xfrm_policy *);
 void fswan_bpf_iface_topo_publish(struct interface *iface);
 void fswan_bpf_iface_topo_seed(struct fswan_bpf_prog *p);
+void fswan_bpf_redirect_publish(struct interface *iface);
+void fswan_bpf_redirect_seed(struct fswan_bpf_prog *p);

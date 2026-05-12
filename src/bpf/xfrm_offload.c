@@ -78,10 +78,51 @@ struct {
 	__type(value, struct iface_topo);
 } iface_topo SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_DEVMAP_HASH);
+	__uint(max_entries, IFACE_TOPO_MAP_MAX_ENTRIES);
+	__type(key, __u32);
+	__type(value, __u32);
+} redirect_map SEC(".maps");
+
 
 /*
- *	IP header related update
+ *	Explicit width casts produce wide BPF_W/BPF_H stores instead of
+ *	clang's byte-by-byte memcpy fallback (packet pointer is align 1).
+ *	xfrm_mac_copy() stays on u16 because bpf_fib_lookup::dmac at struct
+ *	offset 58 is only 2-aligned on the stack, and the verifier enforces
+ *	strict alignment for stack access regardless of the CPU.
+ *
+ *	Cost (BPF insns, narrow vs wide):
+ *	  MAC pair (FIB xmit)        ~24 -> 12
+ *	  reformat 14B (eth)          28 -> 6
+ *	  reformat 18B (eth + vlan)   36 -> 6   (hot ingress path)
  */
+static __always_inline void
+xfrm_mac_copy(__u8 *dst, const __u8 *src)
+{
+	*(__u16 *)(dst + 0) = *(__u16 *)(src + 0);
+	*(__u16 *)(dst + 2) = *(__u16 *)(src + 2);
+	*(__u16 *)(dst + 4) = *(__u16 *)(src + 4);
+}
+
+static __always_inline void
+xfrm_eth_hdr_copy(__u8 *dst, const __u8 *src)
+{
+	*(__u64 *)(dst + 0)  = *(__u64 *)(src + 0);
+	*(__u32 *)(dst + 8)  = *(__u32 *)(src + 8);
+	*(__u16 *)(dst + 12) = *(__u16 *)(src + 12);
+}
+
+static __always_inline void
+xfrm_eth_vlan_hdr_copy(__u8 *dst, const __u8 *src)
+{
+	*(__u64 *)(dst + 0)  = *(__u64 *)(src + 0);
+	*(__u64 *)(dst + 8)  = *(__u64 *)(src + 8);
+	*(__u16 *)(dst + 16) = *(__u16 *)(src + 16);
+}
+
+
 static __always_inline int
 ip_decrease_ttl(struct iphdr *iph)
 {
@@ -92,9 +133,6 @@ ip_decrease_ttl(struct iphdr *iph)
 	return --iph->ttl;
 }
 
-/*
- *	Stats related
- */
 static __always_inline void
 xfrm_stats_update(struct xdp_md *ctx, struct ipv4_xfrm_policy *p)
 {
@@ -112,38 +150,37 @@ xfrm_stats_update(struct xdp_md *ctx, struct ipv4_xfrm_policy *p)
 	s->bytes += (ctx->data_end - ctx->data);
 }
 
-/*
- *	FIB xmit
- */
+/* Same-port retransmit shortcuts the redirect lookup. */
+static __always_inline int
+xfrm_xmit_to(struct xdp_md *ctx, __u32 ifindex)
+{
+	if (ctx->ingress_ifindex == ifindex)
+		return XDP_TX;
+	return bpf_redirect_map(&redirect_map, ifindex, 0);
+}
+
 static __always_inline int
 xfrm_fib_xmit(struct xdp_md *ctx, struct bpf_fib_lookup *fib)
 {
-	void *data, *data_end;
-	struct ethhdr *ethh;
+	void *data     = (void *) (long) ctx->data;
+	void *data_end = (void *) (long) ctx->data_end;
+	struct ethhdr *eth = data;
 
-	data     = (void *) (long) ctx->data;
-	data_end = (void *) (long) ctx->data_end;
-	ethh     = data;
-	if ((void *) (ethh + 1) > data_end)
+	if ((void *) (eth + 1) > data_end)
 		return XDP_DROP;
-	__builtin_memcpy(ethh->h_dest, fib->dmac, ETH_ALEN);
-	__builtin_memcpy(ethh->h_source, fib->smac, ETH_ALEN);
 
-	if (ctx->ingress_ifindex == fib->ifindex)
-		return XDP_TX;
-	return bpf_redirect(fib->ifindex, 0);
+	xfrm_mac_copy(eth->h_dest, fib->dmac);
+	xfrm_mac_copy(eth->h_source, fib->smac);
+	return xfrm_xmit_to(ctx, fib->ifindex);
 }
 
-/*
- *	VLAN xmit
- */
 static __always_inline int
 xfrm_fib_xmit_vlan(struct xdp_md *ctx, struct bpf_fib_lookup *fib,
 		   struct iface_topo *t)
 {
 	const int vlan_sz = (int) sizeof(struct _vlan_hdr);
-	struct _vlan_hdr *vlan;
 	void *data, *data_end;
+	struct _vlan_hdr *vlan;
 	struct ethhdr *eth;
 
 	if (bpf_xdp_adjust_head(ctx, -vlan_sz))
@@ -156,25 +193,20 @@ xfrm_fib_xmit_vlan(struct xdp_md *ctx, struct bpf_fib_lookup *fib,
 
 	eth = data;
 	vlan = (void *) (eth + 1);
-	__builtin_memcpy(eth->h_dest, fib->dmac, ETH_ALEN);
-	__builtin_memcpy(eth->h_source, fib->smac, ETH_ALEN);
+	xfrm_mac_copy(eth->h_dest, fib->dmac);
+	xfrm_mac_copy(eth->h_source, fib->smac);
 	eth->h_proto = bpf_htons(ETH_P_8021Q);
 	vlan->hvlan_TCI = bpf_htons(t->vlan_id & 0x0fff);
 	/* vlan->h_vlan_encapsulated_proto already holds the original ethertype */
 
-	if (ctx->ingress_ifindex == t->link_ifindex)
-		return XDP_TX;
-	return bpf_redirect(t->link_ifindex, 0);
+	return xfrm_xmit_to(ctx, t->link_ifindex);
 }
 
-/*
- *	FIB lookup
- */
 static __always_inline int
 xfrm_fib_lookup(struct xdp_md *ctx, struct iphdr *iph, struct ipv4_xfrm_policy *p)
 {
 	struct bpf_fib_lookup fib_params;
-	struct iface_topo *t = NULL;
+	struct iface_topo *t;
 	__u32 idx;
 	int ret;
 
@@ -187,9 +219,7 @@ xfrm_fib_lookup(struct xdp_md *ctx, struct iphdr *iph, struct ipv4_xfrm_policy *
 	fib_params.ipv4_dst	= iph->daddr;
 	ret = bpf_fib_lookup(ctx, &fib_params, sizeof(fib_params), BPF_FIB_LOOKUP_DIRECT);
 
-	/* Keep in mind that forwarding need to be enabled
-	 * on interface we may need to redirect traffic to/from
-	 */
+	/* Redirect target iface needs forwarding enabled. */
 	if (ret != BPF_FIB_LKUP_RET_SUCCESS)
 		return XDP_PASS;
 
@@ -198,60 +228,51 @@ xfrm_fib_lookup(struct xdp_md *ctx, struct iphdr *iph, struct ipv4_xfrm_policy *
 	xfrm_stats_update(ctx, p);
 
 	idx = fib_params.ifindex;
-	if (idx < IFACE_TOPO_MAP_MAX_ENTRIES)
-		t = bpf_map_lookup_elem(&iface_topo, &idx);
+	t = bpf_map_lookup_elem(&iface_topo, &idx);
 	if (t && t->vlan_id)
 		return xfrm_fib_xmit_vlan(ctx, &fib_params, t);
 	return xfrm_fib_xmit(ctx, &fib_params);
 }
 
-/*
- *	Hairpin-to-nexthop xmit
- *
- * Input is always untagged (post-IPsec-decap).
- */
+/* Input is always untagged (post-IPsec-decap). */
 static __always_inline int
 xfrm_hairpin_xmit(struct xdp_md *ctx, struct iphdr *iph, struct ipv4_xfrm_policy *p)
 {
 	const int vlan_sz = (int) sizeof(struct _vlan_hdr);
-	struct hairpin_nexthop *nh = NULL;
+	struct hairpin_nexthop *nh;
 	__u32 ingress = ctx->ingress_ifindex;
 	void *data, *data_end;
-	bool tagged;
+	__u8 flags;
 
-	if (ingress < HAIRPIN_MAP_MAX_ENTRIES)
-		nh = bpf_map_lookup_elem(&hairpin_map, &ingress);
-	if (!nh || !nh->hdr_len)
+	nh = bpf_map_lookup_elem(&hairpin_map, &ingress);
+	if (!nh || !(nh->flags & HAIRPIN_FL_VALID))
 		return xfrm_fib_lookup(ctx, iph, p);
 
 	/* TTL while iph is still bounds-valid */
 	ip_decrease_ttl(iph);
 
-	tagged = (nh->hdr_len == ETH_HLEN + vlan_sz);
-	if (tagged && bpf_xdp_adjust_head(ctx, -vlan_sz))
+	flags = nh->flags;
+	if ((flags & HAIRPIN_FL_TAGGED) && bpf_xdp_adjust_head(ctx, -vlan_sz))
 		return XDP_DROP;
 
 	data = (void *) (long) ctx->data;
 	data_end = (void *) (long) ctx->data_end;
 
-	/* Verifier requires constant-size memcpy per branch */
-	if (tagged) {
+	/* Verifier requires constant-size copy per branch */
+	if (flags & HAIRPIN_FL_TAGGED) {
 		if (data + ETH_HLEN + vlan_sz > data_end)
 			return XDP_DROP;
-		__builtin_memcpy(data, nh->reformat, ETH_HLEN + vlan_sz);
+		xfrm_eth_vlan_hdr_copy(data, nh->reformat);
 	} else {
 		if (data + ETH_HLEN > data_end)
 			return XDP_DROP;
-		__builtin_memcpy(data, nh->reformat, ETH_HLEN);
+		xfrm_eth_hdr_copy(data, nh->reformat);
 	}
 
 	xfrm_stats_update(ctx, p);
 	return XDP_TX;
 }
 
-/*
- *	XFRM Policy lookup
- */
 static __always_inline struct ipv4_xfrm_policy *
 xfrm_policy_lookup(struct iphdr *iph)
 {
@@ -269,15 +290,38 @@ xfrm_policy_lookup(struct iphdr *iph)
 	return bpf_map_lookup_elem(&policy_lpm, &pk);
 }
 
-static __always_inline int
-xdp_xfrm_offload(struct parse_pkt *pkt)
+SEC("xdp")
+int xfrm_offload(struct xdp_md *ctx)
 {
-	void *data_end = (void *) (long) pkt->ctx->data_end;
-	void *data = (void *) (long) pkt->ctx->data;
+	void *data_end = (void *) (long) ctx->data_end;
+	void *data = (void *) (long) ctx->data;
 	struct ipv4_xfrm_policy *p;
+	struct _vlan_hdr *vlan_hdr;
+	struct ethhdr *eth = data;
 	struct iphdr *iph;
+	__u16 eth_type;
+	__u8 l3_offset;
 
-	iph = data + pkt->l3_offset;
+	if (unlikely((void *) (eth + 1) > data_end))
+		return XDP_PASS;
+
+	eth_type = eth->h_proto;
+	l3_offset = sizeof(*eth);
+
+	if (eth_type == bpf_htons(ETH_P_8021Q) ||
+	    eth_type == bpf_htons(ETH_P_8021AD)) {
+		vlan_hdr = (void *) eth + l3_offset;
+		l3_offset += sizeof(*vlan_hdr);
+		if (unlikely((void *) eth + l3_offset > data_end))
+			return XDP_PASS;
+		eth_type = vlan_hdr->h_vlan_encapsulated_proto;
+	}
+
+	/* FIXME: Add support to IPv6 */
+	if (eth_type != bpf_htons(ETH_P_IP))
+		return XDP_PASS;
+
+	iph = data + l3_offset;
 	if (unlikely((void *) (iph + 1) > data_end))
 		return XDP_PASS;
 
@@ -285,79 +329,14 @@ xdp_xfrm_offload(struct parse_pkt *pkt)
 	if (!p)
 		return XDP_PASS;
 
-	/* Egress policy simply redirect to policy ifindex.
-	 * HW learnt Layer2 src and dst MAC during XFRM policy
-	 * offload settings. */
+	/* HW set L2 MACs at SA install, no rewrite needed. */
 	if (p->flags & XFRM_POLICY_FL_EGRESS) {
 		ip_decrease_ttl(iph);
-		xfrm_stats_update(pkt->ctx, p);
-
-		if (pkt->ctx->ingress_ifindex == p->ifindex)
-			return XDP_TX;
-
-		return bpf_redirect(p->ifindex, 0);
+		xfrm_stats_update(ctx, p);
+		return xfrm_xmit_to(ctx, p->ifindex);
 	}
 
-	return xfrm_hairpin_xmit(pkt->ctx, iph, p);
-}
-
-/*
- *	Ethernet frame parsing and sanitize
- */
-static __always_inline bool
-parse_eth_frame(struct parse_pkt *pkt)
-{
-	void *data_end = (void *) (long) pkt->ctx->data_end;
-	void *data = (void *) (long) pkt->ctx->data;
-	struct _vlan_hdr *vlan_hdr;
-	struct ethhdr *eth = data;
-	__u16 eth_type, vlan = 0;
-	__u8 offset;
-
-	offset = sizeof(*eth);
-
-	/* Make sure packet is large enough for parsing eth */
-	if (unlikely((void *) eth + offset > data_end))
-		return false;
-
-	eth_type = eth->h_proto;
-
-	/* Handle outer VLAN tag */
-	if (eth_type == bpf_htons(ETH_P_8021Q) ||
-	    eth_type == bpf_htons(ETH_P_8021AD)) {
-		vlan_hdr = (void *) eth + offset;
-		vlan = bpf_ntohs(vlan_hdr->hvlan_TCI);
-		pkt->vlan_id = vlan & 0x0fff;
-		offset += sizeof (*vlan_hdr);
-		if (unlikely((void *) eth + offset > data_end))
-			return false;
-
-		eth_type = vlan_hdr->h_vlan_encapsulated_proto;
-	}
-
-	/* FIXME: Add support to IPv6 */
-	if (eth_type != bpf_htons(ETH_P_IP))
-		return false;
-
-	pkt->l3_proto = bpf_ntohs(eth_type);
-	pkt->l3_offset = offset;
-	return true;
-}
-
-
-SEC("xdp")
-int xfrm_offload(struct xdp_md *ctx)
-{
-	struct parse_pkt pkt = { .ctx = ctx,
-				 .vlan_id = 0,
-				 .l3_proto = 0,
-				 .l3_offset = 0
-			       };
-
-	if (!parse_eth_frame(&pkt))
-		return XDP_PASS;
-
-	return xdp_xfrm_offload(&pkt);
+	return xfrm_hairpin_xmit(ctx, iph, p);
 }
 
 char _license[] SEC("license") = "GPL";

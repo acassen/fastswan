@@ -66,6 +66,7 @@ fswan_bpf_xfrm_map_load(struct fswan_bpf_prog *p)
 	err = err ? : fswan_bpf_map_load(p, "xfrm_policy_stats_array", FSWAN_BPF_MAP_POLICY_STATS_ARRAY);
 	err = err ? : fswan_bpf_map_load(p, "hairpin_map", FSWAN_BPF_MAP_HAIRPIN);
 	err = err ? : fswan_bpf_map_load(p, "iface_topo", FSWAN_BPF_MAP_IFACE_TOPO);
+	err = err ? : fswan_bpf_map_load(p, "redirect_map", FSWAN_BPF_MAP_REDIRECT);
 
 	return err;
 }
@@ -118,6 +119,50 @@ fswan_bpf_iface_topo_seed(struct fswan_bpf_prog *p)
 
 	list_for_each_entry(iface, &daemon_data->interfaces, next)
 		fswan_bpf_iface_topo_write(p, iface);
+}
+
+
+/*
+ *	DEVMAP_HASH mirror feeding bpf_redirect_map() in xfrm_offload.bpf.
+ *	VLAN subifs land in the map but stay inert because 8021q has no
+ *	ndo_xdp_xmit, and the data plane targets link_ifindex after pushing
+ *	its own VLAN tag anyway.
+ */
+static int
+fswan_bpf_redirect_write(struct fswan_bpf_prog *p, struct interface *iface)
+{
+	struct bpf_map *map;
+	uint32_t key = iface->ifindex;
+	uint32_t val = iface->ifindex;
+
+	if (!p || !p->bpf_maps)
+		return 0;
+	if (__test_bit(FSWAN_BPF_PROG_FL_SHUTDOWN_BIT, &p->flags))
+		return 0;
+	map = p->bpf_maps[FSWAN_BPF_MAP_REDIRECT].map;
+	if (!map || !key)
+		return 0;
+
+	return bpf_map__update_elem(map, &key, sizeof(key),
+				    &val, sizeof(val), 0);
+}
+
+void
+fswan_bpf_redirect_publish(struct interface *iface)
+{
+	struct fswan_bpf_prog *p;
+
+	list_for_each_entry(p, &daemon_data->bpf_progs, next)
+		fswan_bpf_redirect_write(p, iface);
+}
+
+void
+fswan_bpf_redirect_seed(struct fswan_bpf_prog *p)
+{
+	struct interface *iface;
+
+	list_for_each_entry(iface, &daemon_data->interfaces, next)
+		fswan_bpf_redirect_write(p, iface);
 }
 
 
