@@ -35,7 +35,9 @@ update_rate(struct iface_rate *r, uint64_t cur_bytes, uint64_t cur_pkts,
 	    uint64_t elapsed)
 {
 	if (elapsed) {
-		r->bw_bps = (cur_bytes - r->prev_bytes) * 1000000000ULL / elapsed;
+		/* bits/s, double keeps the math overflow-free at 100G+ rates */
+		r->bw_bps = (uint64_t)((double)(cur_bytes - r->prev_bytes)
+				       * 8e9 / elapsed);
 		r->pps = (cur_pkts - r->prev_pkts) * 1000000000ULL / elapsed;
 	}
 	r->prev_bytes = cur_bytes;
