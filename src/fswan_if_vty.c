@@ -37,6 +37,7 @@
 #include "cpu.h"
 #include "ethtool.h"
 #include "pci.h"
+#include "timer.h"
 #include "inet_utils.h"
 #include "fswan_data.h"
 #include "fswan_cpu.h"
@@ -704,6 +705,51 @@ DEFUN(show_interface_stats,
 	return CMD_SUCCESS;
 }
 
+DEFUN(show_interface_stats_csv,
+      show_interface_stats_csv_cmd,
+      "show interface stats-csv WORD",
+      SHOW_STR
+      "Interface\n"
+      "Emit one TSV row with the current rates and per-rx-queue CPU load,"
+      " intended for an external bench harness that loops every N seconds"
+      " and appends to a file. Columns: ts_ns, ifname, rx_bps, tx_bps,"
+      " rx_pps, tx_pps, then (cpu, load) pairs for each bound rx-queue\n"
+      "Interface name\n")
+{
+	struct interface *iface = fswan_if_get(argv[0], false);
+	int nrxq, q, cpu;
+
+	if (!iface) {
+		vty_out(vty, "%% Unknown interface '%s'%s", argv[0], VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+
+	vty_out(vty, "%lu\t%s\t%lu\t%lu\t%lu\t%lu",
+		(unsigned long)clock_gettime_ns(CLOCK_REALTIME),
+		iface->ifname,
+		(unsigned long)iface->rx.bw_bps,
+		(unsigned long)iface->tx.bw_bps,
+		(unsigned long)iface->rx.pps,
+		(unsigned long)iface->tx.pps);
+
+	nrxq = (int)iface->nr_rx_queues;
+	if (nrxq && cpu_load) {
+		int cpu_per_q[nrxq];
+
+		memset(cpu_per_q, -1, sizeof(cpu_per_q));
+		fswan_if_rxq_cpu(iface, cpu_per_q, nrxq);
+		for (q = 0; q < nrxq; q++) {
+			cpu = cpu_per_q[q];
+			if (cpu < 0)
+				continue;
+			vty_out(vty, "\t%d\t%.4f", cpu, cpu_load_get(cpu_load, cpu));
+		}
+	}
+
+	vty_out(vty, "%s", VTY_NEWLINE);
+	return CMD_SUCCESS;
+}
+
 DEFUN(show_interface_dashboard,
       show_interface_dashboard_cmd,
       "show interface dashboard WORD",
@@ -854,6 +900,7 @@ cmd_ext_interface_install(void)
 	install_element(VIEW_NODE, &show_interface_cmd);
 	install_element(VIEW_NODE, &show_interface_stats_all_cmd);
 	install_element(VIEW_NODE, &show_interface_stats_cmd);
+	install_element(VIEW_NODE, &show_interface_stats_csv_cmd);
 	install_element(VIEW_NODE, &show_interface_dashboard_cmd);
 	install_element(VIEW_NODE, &show_interface_ipsec_cmd);
 	install_element(VIEW_NODE, &show_interface_rxq_topology_cmd);
@@ -861,6 +908,7 @@ cmd_ext_interface_install(void)
 	install_element(ENABLE_NODE, &show_interface_cmd);
 	install_element(ENABLE_NODE, &show_interface_stats_all_cmd);
 	install_element(ENABLE_NODE, &show_interface_stats_cmd);
+	install_element(ENABLE_NODE, &show_interface_stats_csv_cmd);
 	install_element(ENABLE_NODE, &show_interface_dashboard_cmd);
 	install_element(ENABLE_NODE, &show_interface_ipsec_cmd);
 	install_element(ENABLE_NODE, &show_interface_rxq_topology_cmd);
