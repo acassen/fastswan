@@ -23,9 +23,11 @@
 
 /* system includes */
 #include <string.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
 #include <arpa/inet.h>
+#include <sys/socket.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <linux/pkt_sched.h>
@@ -36,6 +38,7 @@
 #include <linux/tc_act/tc_mirred.h>
 
 /* local includes */
+#include "memory.h"
 #include "logger.h"
 #include "inet_utils.h"
 #include "fswan_data.h"
@@ -53,9 +56,17 @@ extern struct data *daemon_data;
 #define FLOWER_REQ_BUFSIZE	2048
 #define FLOWER_REPLY_BUFSIZE	8192
 
-/* 256 in-flight ACKs (~52 bytes each) fit within the default netlink
- * rcvbuf, so the pipeline never stalls on socket backpressure. */
+/* Per-ACK skb truesize is ~1KB after kernel accounting, so 256 outstanding
+ * ACKs need ~256KB headroom. 4MB stays robust even at 10k+ tunnels when
+ * kernel processing lags userland sends. */
+#define FLOWER_RCVBUF_SIZE	(4 * 1024 * 1024)
+
+/* Pipeline window for outstanding install ACKs. */
 #define FLOWER_PIPELINE_MAX	256
+
+/* Distinct ifaces a single pipeline batch may touch. Replay is per-iface,
+ * so 16 is plenty even with many netdevs in furious-mode. */
+#define FLOWER_RECONCILE_MAX_IFACES	16
 
 
 /*
@@ -74,8 +85,17 @@ struct flower_dump_ctx {
 
 struct flower_pending {
 	uint32_t			seq;
+	int				ifindex;
+	struct fswan_flower_sel		sel;
 	fswan_flower_install_cb		cb;
 	void				*ctx;
+};
+
+struct flower_reconcile_iface {
+	int				ifindex;
+	struct fswan_flower_sel		*sels;
+	int				n_sels;
+	int				cap;
 };
 
 
@@ -123,8 +143,13 @@ flower_send(struct nlmsghdr *n)
 	return 0;
 }
 
+/*	When expected_seq is non-zero, replies with a different seq are
+ *	skipped so a late ACK from a previous batch does not short-circuit
+ *	the current response.
+ */
 static int
-flower_recv(void (*cb)(struct nlmsghdr *, void *), void *ctx)
+flower_recv(uint32_t expected_seq,
+	    void (*cb)(struct nlmsghdr *, void *), void *ctx)
 {
 	char buf[FLOWER_REPLY_BUFSIZE]
 		__attribute__((aligned(__alignof__(struct nlmsghdr))));
@@ -155,6 +180,9 @@ flower_recv(void (*cb)(struct nlmsghdr *, void *), void *ctx)
 		mlen = (size_t) len;
 		for (h = (struct nlmsghdr *) buf; NLMSG_OK(h, mlen);
 		     h = NLMSG_NEXT(h, mlen)) {
+			if (expected_seq && h->nlmsg_seq != expected_seq)
+				continue;
+
 			if (h->nlmsg_type == NLMSG_DONE)
 				return 0;
 
@@ -189,7 +217,7 @@ flower_send_sync(struct nlmsghdr *n,
 	err = flower_send(n);
 	if (err < 0)
 		return err;
-	return flower_recv(cb, ctx);
+	return flower_recv(n->nlmsg_seq, cb, ctx);
 }
 
 
@@ -401,6 +429,7 @@ fswan_netlink_flower_filter_add(int ifindex, uint32_t handle,
 				const struct fswan_flower_sel *sel,
 				uint16_t vlan_id, int redirect_ifindex)
 {
+	uint32_t seq;
 	int err;
 
 	/* Flush pipelined ACKs first so the sync recv does not consume them
@@ -409,10 +438,10 @@ fswan_netlink_flower_filter_add(int ifindex, uint32_t handle,
 		fswan_netlink_flower_filter_drain();
 
 	err = flower_filter_send_msg(ifindex, handle, sel, vlan_id,
-				     redirect_ifindex, NULL);
+				     redirect_ifindex, &seq);
 	if (err < 0)
 		return err;
-	return flower_recv(NULL, NULL);
+	return flower_recv(seq, NULL, NULL);
 }
 
 int
@@ -439,6 +468,8 @@ fswan_netlink_flower_filter_add_pipelined(int ifindex, uint32_t handle,
 		return err;
 
 	pipeline[pipeline_n].seq = seq;
+	pipeline[pipeline_n].ifindex = ifindex;
+	pipeline[pipeline_n].sel = *sel;
 	pipeline[pipeline_n].cb = cb;
 	pipeline[pipeline_n].ctx = ctx;
 	pipeline_n++;
@@ -446,26 +477,170 @@ fswan_netlink_flower_filter_add_pipelined(int ifindex, uint32_t handle,
 }
 
 /*
- *	Fire every pending cb because callers own per-add allocations and
- *	must release them when the ACK stream cannot recover. Otherwise a
- *	later drain would dereference freed state.
+ *	Comparator for qsort/bsearch over fswan_flower_sel arrays. Lex
+ *	order on the four selector fields, matching the rbtree key in
+ *	fswan_flower.c so both readers stay aligned.
+ */
+static int
+flower_sel_qcmp(const void *a, const void *b)
+{
+	const struct fswan_flower_sel *sa = a;
+	const struct fswan_flower_sel *sb = b;
+
+	if (sa->saddr != sb->saddr)
+		return (sa->saddr < sb->saddr) ? -1 : 1;
+	if (sa->daddr != sb->daddr)
+		return (sa->daddr < sb->daddr) ? -1 : 1;
+	if (sa->prefixlen_s != sb->prefixlen_s)
+		return (int) sa->prefixlen_s - (int) sb->prefixlen_s;
+	return (int) sa->prefixlen_d - (int) sb->prefixlen_d;
+}
+
+/*
+ *	Empty the socket queue without blocking. Anything still pending
+ *	from the overflowed batch is discarded as stale before the
+ *	reconcile dump issues a fresh request.
  */
 static void
-flower_pipeline_abort(int err)
+flower_drain_stale(void)
+{
+	char buf[FLOWER_REPLY_BUFSIZE]
+		__attribute__((aligned(__alignof__(struct nlmsghdr))));
+	struct sockaddr_nl snl;
+	struct iovec iov = { .iov_base = buf, .iov_len = sizeof(buf) };
+	struct msghdr msg = {
+		.msg_name = &snl,
+		.msg_namelen = sizeof(snl),
+		.msg_iov = &iov,
+		.msg_iovlen = 1,
+	};
+	ssize_t len;
+
+	do {
+		len = recvmsg(nl_flower.fd, &msg, MSG_DONTWAIT);
+	} while (len > 0 || (len < 0 && errno == EINTR));
+}
+
+static struct flower_reconcile_iface *
+flower_reconcile_find(struct flower_reconcile_iface *ifs, int n, int ifindex)
 {
 	int i;
 
-	for (i = 0; i < pipeline_n; i++) {
-		if (pipeline[i].cb)
-			pipeline[i].cb(err, pipeline[i].ctx);
+	for (i = 0; i < n; i++) {
+		if (ifs[i].ifindex == ifindex)
+			return &ifs[i];
 	}
+	return NULL;
+}
+
+static void
+flower_reconcile_dump_cb(const struct fswan_flower_sel *sel,
+			 __attribute__((unused)) uint64_t pkts,
+			 __attribute__((unused)) uint64_t bytes,
+			 void *ctx)
+{
+	struct flower_reconcile_iface *r = ctx;
+	struct fswan_flower_sel *p;
+	int new_cap;
+
+	if (r->n_sels == r->cap) {
+		new_cap = r->cap ? r->cap * 2 : 256;
+		p = REALLOC(r->sels, new_cap * sizeof(*p));
+		if (!p)
+			return;
+		r->sels = p;
+		r->cap = new_cap;
+	}
+	r->sels[r->n_sels++] = *sel;
+}
+
+static int
+flower_reconcile_collect_ifaces(struct flower_reconcile_iface *ifs, int max,
+				const struct flower_pending *saved, int n)
+{
+	int n_ifs = 0;
+	int i;
+
+	for (i = 0; i < n; i++) {
+		if (flower_reconcile_find(ifs, n_ifs, saved[i].ifindex))
+			continue;
+		if (n_ifs == max)
+			break;
+		ifs[n_ifs++].ifindex = saved[i].ifindex;
+	}
+	return n_ifs;
+}
+
+static void
+flower_reconcile_dump_iface(struct flower_reconcile_iface *r)
+{
+	fswan_netlink_flower_dump(r->ifindex, flower_reconcile_dump_cb, r);
+	if (r->n_sels > 1)
+		qsort(r->sels, r->n_sels, sizeof(*r->sels), flower_sel_qcmp);
+}
+
+static bool
+flower_reconcile_present(struct flower_reconcile_iface *ifs, int n,
+			 const struct flower_pending *p)
+{
+	struct flower_reconcile_iface *r;
+
+	r = flower_reconcile_find(ifs, n, p->ifindex);
+	if (!r || !r->n_sels)
+		return false;
+	return bsearch(&p->sel, r->sels, r->n_sels, sizeof(*r->sels),
+		       flower_sel_qcmp) != NULL;
+}
+
+/*
+ *	Reconcile pending entries against committed kernel state after
+ *	the ACK stream broke. Selectors present in the per-iface dump
+ *	fire cb(0) so callers can record them as installed, while misses
+ *	fire cb(err) and callers release per-add allocations.
+ */
+static void
+flower_pipeline_reconcile(int err)
+{
+	struct flower_reconcile_iface ifs[FLOWER_RECONCILE_MAX_IFACES];
+	struct flower_pending saved[FLOWER_PIPELINE_MAX];
+	int saved_n = pipeline_n;
+	int n_ifs;
+	int i;
+
+	if (saved_n == 0)
+		return;
+
+	flower_drain_stale();
+
+	memcpy(saved, pipeline, saved_n * sizeof(*saved));
 	pipeline_n = 0;
+
+	memset(ifs, 0, sizeof(ifs));
+	n_ifs = flower_reconcile_collect_ifaces(ifs,
+					       FLOWER_RECONCILE_MAX_IFACES,
+					       saved, saved_n);
+
+	for (i = 0; i < n_ifs; i++)
+		flower_reconcile_dump_iface(&ifs[i]);
+
+	for (i = 0; i < saved_n; i++) {
+		int rc = flower_reconcile_present(ifs, n_ifs, &saved[i])
+			 ? 0 : err;
+
+		if (saved[i].cb)
+			saved[i].cb(rc, saved[i].ctx);
+	}
+
+	for (i = 0; i < n_ifs; i++)
+		FREE_PTR(ifs[i].sels);
 }
 
 /*
  *	ACKs arrive in send order (single-socket guarantee) so head-pop
- *	suffices. Abort on seq mismatch or socket error because a missing
- *	ACK would block the drain forever.
+ *	suffices. Reconcile on seq mismatch or socket error because a
+ *	missing ACK would otherwise block the drain forever, and the
+ *	dump walks committed kernel state to recover the right
+ *	success/failure verdict for each pending entry.
  */
 int
 fswan_netlink_flower_filter_drain(void)
@@ -495,11 +670,11 @@ fswan_netlink_flower_filter_drain(void)
 		} while (len < 0 && errno == EINTR);
 		if (len <= 0) {
 			log_message(LOG_INFO, "%s(): recvmsg failed,"
-					      " aborting %d pending installs"
+					      " reconciling %d pending installs"
 					      " (errno=%d %s)"
 					    , __FUNCTION__, pipeline_n
 					    , errno, strerror(errno));
-			flower_pipeline_abort(-EIO);
+			flower_pipeline_reconcile(-EIO);
 			return -1;
 		}
 
@@ -515,11 +690,11 @@ fswan_netlink_flower_filter_drain(void)
 			if (h->nlmsg_seq != p->seq) {
 				log_message(LOG_INFO, "%s(): unexpected ack"
 						      " seq %u (expected %u),"
-						      " aborting %d pending"
+						      " reconciling %d pending"
 						    , __FUNCTION__
 						    , h->nlmsg_seq, p->seq
 						    , pipeline_n);
-				flower_pipeline_abort(-EIO);
+				flower_pipeline_reconcile(-EIO);
 				return -1;
 			}
 
@@ -773,6 +948,9 @@ fswan_netlink_flower_init(void)
 				      " flower channel");
 		return -1;
 	}
+
+	/* Pipeline ACKs overflow the default rcvbuf; force a larger one. */
+	inet_setsockopt_rcvbuf_force(nl_flower.fd, FLOWER_RCVBUF_SIZE);
 	return 0;
 }
 

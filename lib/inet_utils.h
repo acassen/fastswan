@@ -106,6 +106,7 @@ int inet_setsockopt_promisc(int fd, int ifindex, bool enable);
 int inet_setsockopt_attach_bpf(int fd, int prog_fd);
 int inet_setsockopt_no_receive(int fd);
 int inet_setsockopt_rcvbuf(int fd, int optval);
+int inet_setsockopt_rcvbuf_force(int fd, int optval);
 int inet_setsockopt_sndbuf(int fd, int optval );
 int inet_setsockopt_sndbufforce(int fd, int optval);
 int inet_setsockopt_bindtodevice(int fd, const char *ifname);

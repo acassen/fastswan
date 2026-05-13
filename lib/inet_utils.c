@@ -785,6 +785,19 @@ inet_setsockopt_rcvbuf(int fd, int optval)
 }
 
 int
+inet_setsockopt_rcvbuf_force(int fd, int optval)
+{
+	int err;
+
+	/* rcvbuf option, bypasses sysctl_rmem_max (needs CAP_NET_ADMIN) */
+	err = setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &optval, sizeof(optval));
+	if (err)
+		log_message(LOG_INFO, "cant set SO_RCVBUFFORCE IP option. errno=%d (%m)", errno);
+
+	return err;
+}
+
+int
 inet_setsockopt_sndbuf(int fd, int optval)
 {
 	int err;
