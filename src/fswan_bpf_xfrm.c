@@ -399,13 +399,15 @@ fswan_bpf_xfrm_lpm_action(int action, struct fswan_bpf_prog *opts, struct xfrm_p
 	char errmsg[FSWAN_XDP_STRERR_BUFSIZE];
 	int err = 0;
 
-	/* We are getting XFRM netlink reflection msg */
+	/* UPDPOLICY and POLEXPIRE carry no selector change for packet-offload
+	 * policies, so we mirror only NEWPOLICY and DELPOLICY into the LPM
+	 * map and let the rest fall through as no-ops. */
 	if (action == XFRM_MSG_NEWPOLICY) {
 		err = fswan_bpf_xfrm_lpm_add(opts, p);
 	} else if (action == XFRM_MSG_DELPOLICY) {
 		err = fswan_bpf_xfrm_lpm_del(opts, p);
 	} else
-		return -1;
+		return 0;
 
 	if (err) {
 		libbpf_strerror(err, errmsg, FSWAN_XDP_STRERR_BUFSIZE);
