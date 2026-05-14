@@ -35,6 +35,7 @@
 #include "thread.h"
 #include "fswan_data.h"
 #include "fswan_netlink.h"
+#include "fswan_netlink_flower.h"
 #include "fswan_bpf_xfrm.h"
 
 /* Local data */
@@ -207,16 +208,17 @@ netlink_xfrm_filter(__attribute__((unused)) struct sockaddr_nl *snl,
 }
 
 
-/*
- *	Kernel Netlink reflector reactor
- */
+/* Drain the flower pipeline at end of recv burst so live broadcasts
+ * commit to the rb-tree before the reactor yields back. */
 static void
 kernel_netlink(struct thread *thread)
 {
 	struct nl_handle *nl = THREAD_ARG(thread);
 
-	if (thread->type != THREAD_READ_TIMEOUT)
+	if (thread->type != THREAD_READ_TIMEOUT) {
 		netlink_parse_info(netlink_xfrm_filter, nl, NULL, true);
+		fswan_netlink_flower_filter_drain();
+	}
 
 	nl->thread = thread_add_read(master, kernel_netlink, nl, nl->fd, TIMER_NEVER, 0);
 }

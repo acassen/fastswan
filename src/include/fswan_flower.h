@@ -43,6 +43,7 @@ struct fswan_flower_rule {
 struct fswan_flower {
 	uint32_t		next_handle;	/* monotonic, starts at 1 */
 	struct rb_root		rules;
+	bool			warmed_up;	/* hairpin-pin rule installed */
 };
 
 

@@ -207,9 +207,12 @@ flower_log_installed(const struct interface *iface,
 }
 
 
+static void flower_warmup_pin(struct interface *iface, uint16_t vlan_id);
+
+
 /*
- *	Pipelined dispatch keeps per-policy kernel latency off the XFRM
- *	reactor. The rb-tree commits in flower_install_done().
+ *	Pipelined dispatch so per-policy kernel latency stays off the XFRM
+ *	reactor. rb-tree commits and hairpin warmup land in the ACK callback.
  */
 static void
 flower_install_done(int err, void *ctx)
@@ -228,14 +231,19 @@ flower_install_done(int err, void *ctx)
 				    , pi->r->sel.prefixlen_d
 				    , -err, strerror(-err));
 		FREE(pi->r);
-		goto out;
+		goto err;
 	}
 
 	rb_add(&pi->r->node, &pi->iface->flower->rules, flower_rule_less);
 	flower_log_installed(pi->iface, pi->r);
 	if (pi->state)
 		pi->state->succeeded++;
- out:
+
+	if (!pi->iface->flower->warmed_up) {
+		flower_warmup_pin(pi->iface, pi->r->vlan_id);
+		pi->iface->flower->warmed_up = true;
+	}
+ err:
 	FREE(pi);
 }
 
@@ -317,14 +325,8 @@ flower_policy_del(struct interface *iface, struct xfrm_policy *p)
 
 
 /*
- *	Capability probe doubles as a warmup rule. Install never-matching mirred
- *	rule that pins the mlx5 hairpin pair so the per-install hairpin RSS
- *	TTC table creation (around 50ms FW commands) only happens once per iface
- *	activation, not periodically when the kernel's refcounted hairpin
- *	pair is reaped by its async destroy timer between install bursts.
- *	Handle stays under INT_MAX so the kernel IDR honors our value
- *	rather than auto-allocating one that would collide with next_handle.
- *	clsact teardown at disable cleans the rule.
+ *	Fail flower-mode at enable time if the driver refuses our action
+ *	chain. Handle stays in IDR range so del actually removes the rule.
  */
 static int
 flower_capability_probe(struct interface *iface)
@@ -335,10 +337,40 @@ flower_capability_probe(struct interface *iface)
 		.prefixlen_s	= 32,
 		.prefixlen_d	= 32,
 	};
-	const uint32_t warm_handle = 0x7ffffffeU;
+	const uint32_t probe_handle = 0x7ffffffeU;
+	int err;
 
-	return fswan_netlink_flower_filter_add(iface->ifindex, warm_handle,
-					       &sel, 0, iface->ifindex);
+	err = fswan_netlink_flower_filter_add(iface->ifindex, probe_handle,
+					      &sel, 0, iface->ifindex);
+	if (err)
+		return err;
+
+	err = fswan_netlink_flower_filter_del(iface->ifindex, probe_handle);
+	if (err)
+		log_message(LOG_INFO, "flower: %s: probe rule del failed"
+				      " (errno=%d %s)"
+				    , iface->ifname, -err, strerror(-err));
+	return 0;
+}
+
+/* Pin a never-matching rule so the mlx5 hairpin pair never falls to
+ * refcount zero and avoids the ~50ms RSS TTC rebuild on the next
+ * install. Matches the first live rule's VLAN to share its tcf_proto.
+ */
+static void
+flower_warmup_pin(struct interface *iface, uint16_t vlan_id)
+{
+	struct fswan_flower_sel sel = {
+		.saddr		= 0xffffffff,
+		.daddr		= 0xffffffff,
+		.prefixlen_s	= 32,
+		.prefixlen_d	= 32,
+	};
+	const uint32_t warm_handle = 0x7fffffffU;
+
+	fswan_netlink_flower_filter_add_pipelined(iface->ifindex, warm_handle,
+						  &sel, vlan_id,
+						  iface->ifindex, NULL, NULL);
 }
 
 
