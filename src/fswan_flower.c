@@ -79,8 +79,8 @@ struct flower_replay_ctx {
 };
 
 /* Lives from filter_add_pipelined dispatch until the matching ACK
- * fires the install_done callback. */
-struct flower_replay_pending {
+ * fires the install_done callback. state is NULL on the live path. */
+struct flower_pending_install {
 	struct fswan_flower_rule	*r;
 	struct interface		*iface;
 	struct flower_replay_state	*state;
@@ -208,11 +208,42 @@ flower_log_installed(const struct interface *iface,
 
 
 /*
- *	Policy helpers
+ *	Pipelined dispatch keeps per-policy kernel latency off the XFRM
+ *	reactor. The rb-tree commits in flower_install_done().
  */
-static int
-flower_policy_add(struct interface *iface, struct xfrm_policy *p)
+static void
+flower_install_done(int err, void *ctx)
 {
+	struct flower_pending_install *pi = ctx;
+
+	if (err) {
+		log_message(LOG_INFO, "flower: %s: skip_sw filter add failed"
+				      " for handle:0x%x"
+				      " src:%u.%u.%u.%u/%d dst:%u.%u.%u.%u/%d"
+				      " (errno=%d %s)"
+				    , pi->iface->ifname, pi->r->handle
+				    , NIPQUAD(pi->r->sel.saddr)
+				    , pi->r->sel.prefixlen_s
+				    , NIPQUAD(pi->r->sel.daddr)
+				    , pi->r->sel.prefixlen_d
+				    , -err, strerror(-err));
+		FREE(pi->r);
+		goto out;
+	}
+
+	rb_add(&pi->r->node, &pi->iface->flower->rules, flower_rule_less);
+	flower_log_installed(pi->iface, pi->r);
+	if (pi->state)
+		pi->state->succeeded++;
+ out:
+	FREE(pi);
+}
+
+static int
+flower_policy_add(struct interface *iface, struct xfrm_policy *p,
+		  struct flower_replay_state *state)
+{
+	struct flower_pending_install *pi;
 	struct fswan_flower_rule *r;
 	uint16_t vlan_id = 0;
 	int err;
@@ -221,35 +252,41 @@ flower_policy_add(struct interface *iface, struct xfrm_policy *p)
 	 * policy that furious-mode already replayed on this iface. */
 	if (flower_rule_find(iface, p))
 		return 0;
-
 	if (flower_egress_resolve(iface, p, &vlan_id) < 0)
 		return -1;
 
 	PMALLOC(r);
 	if (!r)
 		return -1;
+	PMALLOC(pi);
+	if (!pi)
+		goto err_r;
 
 	flower_rule_init_from_policy(r, iface->flower->next_handle++,
 				     vlan_id, p);
+	pi->r = r;
+	pi->iface = iface;
+	pi->state = state;
 
-	err = fswan_netlink_flower_filter_add(iface->ifindex, r->handle,
-					      &r->sel, r->vlan_id,
-					      iface->ifindex);
+	err = fswan_netlink_flower_filter_add_pipelined(iface->ifindex,
+							r->handle, &r->sel,
+							r->vlan_id,
+							iface->ifindex,
+							flower_install_done,
+							pi);
 	if (err) {
-		log_message(LOG_INFO, "flower: %s: skip_sw filter add failed"
-				      " for src:%u.%u.%u.%u/%d dst:%u.%u.%u.%u/%d"
-				      " (errno=%d %s)"
-				    , iface->ifname
-				    , NIPQUAD(p->saddr.a4), p->prefixlen_s
-				    , NIPQUAD(p->daddr.a4), p->prefixlen_d
-				    , -err, strerror(-err));
-		FREE(r);
-		return -1;
+		log_message(LOG_INFO, "flower: %s: pipelined send failed"
+				      " (err=%d)"
+				    , iface->ifname, err);
+		goto err_pi;
 	}
-
-	rb_add(&r->node, &iface->flower->rules, flower_rule_less);
-	flower_log_installed(iface, r);
 	return 0;
+
+ err_pi:
+	FREE(pi);
+ err_r:
+	FREE(r);
+	return -1;
 }
 
 static int
@@ -257,6 +294,10 @@ flower_policy_del(struct interface *iface, struct xfrm_policy *p)
 {
 	struct fswan_flower_rule *r;
 	int err;
+
+	/* Commit any in-flight add for this selector so the rb-tree mirrors
+	 * the kernel before we look up the rule. */
+	fswan_netlink_flower_filter_drain();
 
 	r = flower_rule_find(iface, p);
 	if (!r)
@@ -308,78 +349,6 @@ flower_capability_probe(struct interface *iface)
  *	Replay kernel-side OUT packet-offload policies into flower so SAs
  *	already loaded survive flower-mode activation.
  */
-static void
-flower_replay_install_done(int err, void *ctx)
-{
-	struct flower_replay_pending *pi = ctx;
-
-	if (err) {
-		log_message(LOG_INFO, "flower: %s: skip_sw filter add failed"
-				      " for handle:0x%x"
-				      " src:%u.%u.%u.%u/%d dst:%u.%u.%u.%u/%d"
-				      " (errno=%d %s)"
-				    , pi->iface->ifname, pi->r->handle
-				    , NIPQUAD(pi->r->sel.saddr)
-				    , pi->r->sel.prefixlen_s
-				    , NIPQUAD(pi->r->sel.daddr)
-				    , pi->r->sel.prefixlen_d
-				    , -err, strerror(-err));
-		FREE(pi->r);
-	} else {
-		rb_add(&pi->r->node, &pi->iface->flower->rules,
-		       flower_rule_less);
-		flower_log_installed(pi->iface, pi->r);
-		pi->state->succeeded++;
-	}
-	FREE(pi);
-}
-
-static int
-flower_policy_add_pipelined(struct interface *iface, struct xfrm_policy *p,
-			    struct flower_replay_state *state)
-{
-	struct flower_replay_pending *pi;
-	struct fswan_flower_rule *r;
-	uint16_t vlan_id = 0;
-	int err;
-
-	if (flower_rule_find(iface, p))
-		return -1;
-	if (flower_egress_resolve(iface, p, &vlan_id) < 0)
-		return -1;
-
-	PMALLOC(r);
-	if (!r)
-		return -1;
-	PMALLOC(pi);
-	if (!pi) {
-		FREE(r);
-		return -1;
-	}
-
-	flower_rule_init_from_policy(r, iface->flower->next_handle++,
-				     vlan_id, p);
-	pi->r = r;
-	pi->iface = iface;
-	pi->state = state;
-
-	err = fswan_netlink_flower_filter_add_pipelined(iface->ifindex,
-							r->handle, &r->sel,
-							r->vlan_id,
-							iface->ifindex,
-							flower_replay_install_done,
-							pi);
-	if (err) {
-		log_message(LOG_INFO, "flower: %s: pipelined send failed"
-				      " (err=%d)"
-				    , iface->ifname, err);
-		FREE(pi);
-		FREE(r);
-		return -1;
-	}
-	return 0;
-}
-
 static int
 flower_replay_cb(struct xfrm_policy *p, void *ctx)
 {
@@ -393,7 +362,7 @@ flower_replay_cb(struct xfrm_policy *p, void *ctx)
 		return 0;
 
 	c->state->attempted++;
-	flower_policy_add_pipelined(c->iface, p, c->state);
+	flower_policy_add(c->iface, p, c->state);
 	return 0;
 }
 
@@ -607,7 +576,7 @@ fswan_flower_xfrm_action(int action, struct interface *iface,
 			 struct xfrm_policy *p)
 {
 	if (action == XFRM_MSG_NEWPOLICY)
-		return flower_policy_add(iface, p);
+		return flower_policy_add(iface, p, NULL);
 	if (action == XFRM_MSG_DELPOLICY)
 		return flower_policy_del(iface, p);
 	return 0;
