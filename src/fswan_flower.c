@@ -317,7 +317,14 @@ flower_policy_del(struct interface *iface, struct xfrm_policy *p)
 
 
 /*
- *	Capability probe
+ *	Capability probe doubles as a warmup rule. Install never-matching mirred
+ *	rule that pins the mlx5 hairpin pair so the per-install hairpin RSS
+ *	TTC table creation (around 50ms FW commands) only happens once per iface
+ *	activation, not periodically when the kernel's refcounted hairpin
+ *	pair is reaped by its async destroy timer between install bursts.
+ *	Handle stays under INT_MAX so the kernel IDR honors our value
+ *	rather than auto-allocating one that would collide with next_handle.
+ *	clsact teardown at disable cleans the rule.
  */
 static int
 flower_capability_probe(struct interface *iface)
@@ -328,20 +335,10 @@ flower_capability_probe(struct interface *iface)
 		.prefixlen_s	= 32,
 		.prefixlen_d	= 32,
 	};
-	const uint32_t probe_handle = 0xfffffffeU;
-	int err;
+	const uint32_t warm_handle = 0x7ffffffeU;
 
-	err = fswan_netlink_flower_filter_add(iface->ifindex, probe_handle,
-					      &sel, 0, iface->ifindex);
-	if (err)
-		return err;
-
-	err = fswan_netlink_flower_filter_del(iface->ifindex, probe_handle);
-	if (err)
-		log_message(LOG_INFO, "flower: %s: probe rule del failed"
-				      " (errno=%d %s)"
-				    , iface->ifname, -err, strerror(-err));
-	return 0;
+	return fswan_netlink_flower_filter_add(iface->ifindex, warm_handle,
+					       &sel, 0, iface->ifindex);
 }
 
 
