@@ -238,11 +238,6 @@ flower_install_done(int err, void *ctx)
 	flower_log_installed(pi->iface, pi->r);
 	if (pi->state)
 		pi->state->succeeded++;
-
-	if (!pi->iface->flower->warmed_up) {
-		flower_warmup_pin(pi->iface, pi->r->vlan_id);
-		pi->iface->flower->warmed_up = true;
-	}
  err:
 	FREE(pi);
 }
@@ -262,6 +257,13 @@ flower_policy_add(struct interface *iface, struct xfrm_policy *p,
 		return 0;
 	if (flower_egress_resolve(iface, p, &vlan_id) < 0)
 		return -1;
+
+	/* Must precede live rules, otherwise mlx5 extends the flow group
+	 * and unbinds live mlx5_fc counters from the periodic refresh. */
+	if (!iface->flower->warmed_up) {
+		flower_warmup_pin(iface, vlan_id);
+		iface->flower->warmed_up = true;
+	}
 
 	PMALLOC(r);
 	if (!r)
@@ -353,9 +355,11 @@ flower_capability_probe(struct interface *iface)
 	return 0;
 }
 
-/* Pin a never-matching rule so the mlx5 hairpin pair never falls to
- * refcount zero and avoids the ~50ms RSS TTC rebuild on the next
- * install. Matches the first live rule's VLAN to share its tcf_proto.
+/* Pin a never-matching rule so the mlx5 hairpin pair keeps a non-zero
+ * refcount and skips the around 50ms RSS TTC rebuild on the next install.
+ * VLAN matches the first live rule to share its tcf_proto. Caller must
+ * install before any live filter, otherwise mlx5 unbinds live mlx5_fc
+ * counters when extending the flow group.
  */
 static void
 flower_warmup_pin(struct interface *iface, uint16_t vlan_id)

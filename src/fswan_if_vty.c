@@ -175,15 +175,18 @@ fswan_if_stats_queues_vty(struct vty *vty, const struct interface *iface)
 	memset(cpu_per_q, -1, nr * sizeof(*cpu_per_q));
 	fswan_if_rxq_cpu(iface, cpu_per_q, nr);
 
-	vty_out(vty, "  Per-queue counters:%s", VTY_NEWLINE);
-	vty_out(vty, "    %3s  %4s  %14s  %14s  %12s  %14s  %14s%s",
-		"q", "cpu", "rx_packets", "rx_bytes", "rx_xdp_drop",
+	/* SW-path only as flower skip_sw + hairpin bypasses host RQ/SQ */
+	vty_out(vty, "  Per-queue counters (SW path only):%s", VTY_NEWLINE);
+	vty_out(vty, "    %3s  %4s  %14s  %14s  %10s  %10s  %10s  %14s  %14s%s",
+		"q", "cpu", "rx_packets", "rx_bytes",
+		"xdp_drop", "xdp_redir", "xdp_tx",
 		"tx_packets", "tx_bytes", VTY_NEWLINE);
 	for (q = 0; q < nr; q++) {
 		const struct ethtool_q_stats *qs = &iface->queue_stats[q];
-		vty_out(vty, "    %3u  %4d  %14lu  %14lu  %12lu  %14lu  %14lu%s",
+		vty_out(vty, "    %3u  %4d  %14lu  %14lu  %10lu  %10lu  %10lu  %14lu  %14lu%s",
 			q, cpu_per_q[q],
-			qs->rx_packets, qs->rx_bytes, qs->rx_xdp_drop,
+			qs->rx_packets, qs->rx_bytes,
+			qs->rx_xdp_drop, qs->rx_xdp_redirect, qs->rx_xdp_tx_xmit,
 			qs->tx_packets, qs->tx_bytes, VTY_NEWLINE);
 	}
 	free(cpu_per_q);
