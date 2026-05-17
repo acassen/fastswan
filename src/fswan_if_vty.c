@@ -602,14 +602,15 @@ DEFUN(no_if_hairpin_to_nexthop,
 DEFUN(if_flower_mode,
       if_flower_mode_cmd,
       "flower-mode",
-      "Replace the XDP egress path with mlx5 TC flower HW offload."
-      " Outbound XFRM packet-mode policies on this interface are mirrored to"
-      " clsact ingress flower rules with skip_sw and a mirred-egress redirect"
-      " into the egress IPsec chain. mlx5 driver only.\n")
+      "Replace the XDP egress (and, when supported, inbound) path with"
+      " mlx5 TC flower HW offload. Outbound XFRM packet-mode policies are"
+      " mirrored to clsact ingress flower rules with skip_sw and"
+      " mirred-egress redirect. When kernel post-decrypt is supported,"
+      " the same is done on the post-decrypt chain for inbound. mlx5 only.\n")
 {
 	struct interface *iface = vty->index;
 
-	if (fswan_flower_enable(iface)) {
+	if (fswan_flower_enable(iface, 1)) {
 		vty_out(vty, "%% flower-mode activation failed on %s%s"
 			   , iface->ifname, VTY_NEWLINE);
 		return CMD_WARNING;
@@ -621,6 +622,33 @@ ALIAS(if_flower_mode,
       if_furious_mode_cmd,
       "furious-mode",
       "Alias of flower-mode\n")
+
+DEFUN(if_flower_mode_chain,
+      if_flower_mode_chain_cmd,
+      "flower-mode chain <1-65535>",
+      "Replace the XDP egress (and, when supported, inbound) path with"
+      " mlx5 TC flower HW offload\n"
+      "Override the post-decrypt TC chain index (default 1)\n"
+      "Chain index\n")
+{
+	struct interface *iface = vty->index;
+	int chain;
+
+	VTY_GET_INTEGER_RANGE("chain", chain, argv[0], 1, 65535);
+	if (fswan_flower_enable(iface, (uint16_t)chain)) {
+		vty_out(vty, "%% flower-mode activation failed on %s%s"
+			   , iface->ifname, VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+	return CMD_SUCCESS;
+}
+
+ALIAS(if_flower_mode_chain,
+      if_furious_mode_chain_cmd,
+      "furious-mode chain <1-65535>",
+      "Alias of flower-mode\n"
+      "Override the post-decrypt TC chain index (default 1)\n"
+      "Chain index\n")
 
 DEFUN(no_if_flower_mode,
       no_if_flower_mode_cmd,
@@ -866,8 +894,14 @@ interface_config_write(struct vty *vty)
 		if (iface->hairpin)
 			vty_out(vty, " hairpin-to-nexthop %u.%u.%u.%u%s"
 				   , NIPQUAD(iface->hairpin->nh_addr), VTY_NEWLINE);
-		if (iface->flower)
-			vty_out(vty, " flower-mode%s", VTY_NEWLINE);
+		if (iface->flower) {
+			if (iface->flower->in && iface->flower->in->chain != 1)
+				vty_out(vty, " flower-mode chain %u%s"
+					   , iface->flower->in->chain
+					   , VTY_NEWLINE);
+			else
+				vty_out(vty, " flower-mode%s", VTY_NEWLINE);
+		}
 		vty_out(vty, " %sshutdown%s"
 			   , __test_bit(FSWAN_INTERFACE_FL_SHUTDOWN_BIT, &iface->flags) ? "" : "no "
 			   , VTY_NEWLINE);
@@ -895,6 +929,8 @@ cmd_ext_interface_install(void)
 	install_element(INTERFACE_NODE, &no_if_hairpin_to_nexthop_cmd);
 	install_element(INTERFACE_NODE, &if_flower_mode_cmd);
 	install_element(INTERFACE_NODE, &if_furious_mode_cmd);
+	install_element(INTERFACE_NODE, &if_flower_mode_chain_cmd);
+	install_element(INTERFACE_NODE, &if_furious_mode_chain_cmd);
 	install_element(INTERFACE_NODE, &no_if_flower_mode_cmd);
 	install_element(INTERFACE_NODE, &no_if_furious_mode_cmd);
 	install_element(INTERFACE_NODE, &if_shutdown_cmd);
