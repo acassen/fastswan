@@ -93,6 +93,7 @@ struct flower_replay_state {
 struct flower_replay_ctx {
 	struct interface	*iface;
 	struct flower_replay_state *state;
+	int			dir_filter;	/* XFRM_POLICY_OUT or _IN */
 };
 
 /* Lives from filter_add_pipelined dispatch until the matching ACK
@@ -365,7 +366,7 @@ static int
 flower_policy_add_out(struct interface *iface, struct xfrm_policy *p,
 		      struct flower_replay_state *state)
 {
-	struct fswan_flower_side *side = &iface->flower->out;
+	struct fswan_flower_side *side = iface->flower->out;
 	struct flower_pending_install *pi;
 	struct fswan_flower_rule *r;
 	uint16_t vlan_id = 0;
@@ -510,7 +511,7 @@ static int
 flower_policy_add(struct interface *iface, struct xfrm_policy *p, int dir,
 		  struct flower_replay_state *state)
 {
-	if (dir == XFRM_POLICY_OUT)
+	if (dir == XFRM_POLICY_OUT && iface->flower->out)
 		return flower_policy_add_out(iface, p, state);
 	if (dir == XFRM_POLICY_IN && iface->flower->in)
 		return flower_policy_add_in(iface, p, state);
@@ -520,7 +521,7 @@ flower_policy_add(struct interface *iface, struct xfrm_policy *p, int dir,
 static int
 flower_policy_del_out(struct interface *iface, struct xfrm_policy *p)
 {
-	struct fswan_flower_side *side = &iface->flower->out;
+	struct fswan_flower_side *side = iface->flower->out;
 	struct fswan_flower_rule *r;
 	int err;
 
@@ -573,7 +574,7 @@ flower_policy_del_in(struct interface *iface, struct xfrm_policy *p)
 static int
 flower_policy_del(struct interface *iface, struct xfrm_policy *p, int dir)
 {
-	if (dir == XFRM_POLICY_OUT)
+	if (dir == XFRM_POLICY_OUT && iface->flower->out)
 		return flower_policy_del_out(iface, p);
 	if (dir == XFRM_POLICY_IN && iface->flower->in)
 		return flower_policy_del_in(iface, p);
@@ -684,8 +685,8 @@ flower_warmup_pin_in(struct interface *iface, uint16_t chain,
 
 
 /*
- *	Replay kernel-side OUT packet-offload policies into flower so SAs
- *	already loaded survive flower-mode activation.
+ *	Replay kernel-side packet-offload policies into the side just enabled,
+ *	so SAs already loaded survive activation.
  */
 static int
 flower_replay_cb(struct xfrm_policy *p, void *ctx)
@@ -696,32 +697,34 @@ flower_replay_cb(struct xfrm_policy *p, void *ctx)
 		return 0;
 	if (p->ifindex != c->iface->ifindex)
 		return 0;
+	if (p->dir != c->dir_filter)
+		return 0;
 
-	if (p->dir == XFRM_POLICY_OUT ||
-	    (p->dir == XFRM_POLICY_IN && c->iface->flower->in)) {
-		c->state->attempted++;
-		flower_policy_add(c->iface, p, p->dir, c->state);
-	}
+	c->state->attempted++;
+	flower_policy_add(c->iface, p, p->dir, c->state);
 	return 0;
 }
 
 static void
-flower_replay_existing(struct interface *iface)
+flower_replay_existing(struct interface *iface, int dir)
 {
 	struct flower_replay_state state = {};
 	struct flower_replay_ctx ctx = {
 		.iface = iface,
 		.state = &state,
+		.dir_filter = dir,
 	};
 
 	fswan_netlink_xfrm_policy_walk(flower_replay_cb, &ctx);
 	fswan_netlink_flower_filter_drain();
 
 	if (state.attempted)
-		log_message(LOG_INFO, "flower: %s: replay installed %d/%d"
+		log_message(LOG_INFO, "flower: %s: replay installed %d/%d %s"
 				      " policies"
 				    , iface->ifname
-				    , state.succeeded, state.attempted);
+				    , state.succeeded, state.attempted
+				    , dir == XFRM_POLICY_OUT ? "outbound"
+							     : "inbound");
 }
 
 
@@ -786,9 +789,11 @@ fswan_flower_counter_cache_begin(void)
 		if (!iface->flower)
 			continue;
 		bc.ifindex = iface->ifindex;
-		bc.chain = 0;
-		fswan_netlink_flower_dump(iface->ifindex, 0,
-					  flower_cache_dump_cb, &bc);
+		if (iface->flower->out) {
+			bc.chain = 0;
+			fswan_netlink_flower_dump(iface->ifindex, 0,
+						  flower_cache_dump_cb, &bc);
+		}
 		if (iface->flower->in) {
 			bc.chain = iface->flower->in->chain;
 			fswan_netlink_flower_dump(iface->ifindex,
@@ -961,10 +966,12 @@ fswan_flower_inbound_rebuild(struct interface *iface)
 
 
 /*
- *	Helpers
+ *	Wrapper lifecycle. clsact and the mlx5 driver check are wrapper-scoped,
+ *	so iface->flower comes up with the first active side and goes away
+ *	with the last.
  */
-int
-fswan_flower_enable(struct interface *iface, uint16_t chain)
+static int
+flower_wrapper_ensure(struct interface *iface)
 {
 	char driver[32];
 	int err;
@@ -978,8 +985,8 @@ fswan_flower_enable(struct interface *iface, uint16_t chain)
 		return -1;
 	}
 	if (strcmp(driver, FLOWER_DRIVER_MLX5)) {
-		log_message(LOG_INFO, "flower: %s: driver '%s' is not '%s'"
-				      ", refusing flower-mode"
+		log_message(LOG_INFO, "flower: %s: driver '%s' is not '%s',"
+				      " refusing flower offload"
 				    , iface->ifname, driver, FLOWER_DRIVER_MLX5);
 		return -1;
 	}
@@ -993,43 +1000,95 @@ fswan_flower_enable(struct interface *iface, uint16_t chain)
 		return -1;
 	}
 
-	err = flower_capability_probe_out(iface);
-	if (err) {
-		log_message(LOG_INFO, "flower: %s: outbound probe failed"
-				      " (errno=%d %s)"
-				    , iface->ifname, -err, strerror(-err));
-		fswan_netlink_flower_clsact(iface->ifindex, false);
-		return -1;
-	}
-
 	PMALLOC(iface->flower);
 	if (!iface->flower) {
 		fswan_netlink_flower_clsact(iface->ifindex, false);
 		return -1;
 	}
-	iface->flower->out.next_handle = 1;
+	return 0;
+}
 
-	/* When the inbound probe fails, outbound stays active and inbound
-	 * falls back to XDP. */
-	err = flower_capability_probe_in(iface, chain);
+static void
+flower_wrapper_release(struct interface *iface)
+{
+	fswan_netlink_flower_clsact(iface->ifindex, false);
+	FREE(iface->flower);
+	iface->flower = NULL;
+}
+
+static void
+flower_wrapper_release_if_empty(struct interface *iface)
+{
+	if (iface->flower->out || iface->flower->in)
+		return;
+	flower_wrapper_release(iface);
+}
+
+int
+fswan_flower_enable_out(struct interface *iface)
+{
+	int err;
+
+	if (iface->flower && iface->flower->out)
+		return 0;
+
+	if (flower_wrapper_ensure(iface) < 0)
+		return -1;
+
+	err = flower_capability_probe_out(iface);
 	if (err) {
-		log_message(LOG_INFO, "flower-mode: %s: post-decrypt probe"
-				      " failed (errno=%d %s); inbound stays on"
-				      " XDP, outbound active"
+		log_message(LOG_INFO, "flower: %s: outbound probe failed"
+				      " (errno=%d %s)"
 				    , iface->ifname, -err, strerror(-err));
-	} else {
-		PMALLOC(iface->flower->in);
-		if (iface->flower->in) {
-			iface->flower->in->next_handle = 1;
-			iface->flower->in->chain = chain;
-			log_message(LOG_INFO, "flower-mode: %s: hardware"
-					      " offload active at inbound and"
-					      " outbound (post-decrypt chain %u)"
-					    , iface->ifname, chain);
-		}
+		flower_wrapper_release_if_empty(iface);
+		return -1;
 	}
 
-	flower_replay_existing(iface);
+	PMALLOC(iface->flower->out);
+	if (!iface->flower->out) {
+		flower_wrapper_release_if_empty(iface);
+		return -1;
+	}
+	iface->flower->out->next_handle = 1;
+	log_message(LOG_INFO, "flower: %s: outbound HW offload active"
+			    , iface->ifname);
+
+	flower_replay_existing(iface, XFRM_POLICY_OUT);
+	return 0;
+}
+
+int
+fswan_flower_enable_in(struct interface *iface, uint16_t chain)
+{
+	int err;
+
+	if (iface->flower && iface->flower->in)
+		return 0;
+
+	if (flower_wrapper_ensure(iface) < 0)
+		return -1;
+
+	err = flower_capability_probe_in(iface, chain);
+	if (err) {
+		log_message(LOG_INFO, "flower: %s: post-decrypt probe failed"
+				      " (errno=%d %s)"
+				    , iface->ifname, -err, strerror(-err));
+		flower_wrapper_release_if_empty(iface);
+		return -1;
+	}
+
+	PMALLOC(iface->flower->in);
+	if (!iface->flower->in) {
+		flower_wrapper_release_if_empty(iface);
+		return -1;
+	}
+	iface->flower->in->next_handle = 1;
+	iface->flower->in->chain = chain;
+	log_message(LOG_INFO, "flower: %s: inbound HW offload active"
+			      " (post-decrypt chain %u)"
+			    , iface->ifname, chain);
+
+	flower_replay_existing(iface, XFRM_POLICY_IN);
 	return 0;
 }
 
@@ -1046,26 +1105,43 @@ flower_side_cleanup(struct interface *iface, struct fswan_flower_side *side)
 	}
 }
 
+/* Drain pending install ACKs first because their callbacks would rb_add
+ * into the tree we are about to walk. */
+static void
+flower_disable_side(struct interface *iface,
+		    struct fswan_flower_side **side_pp)
+{
+	if (!*side_pp)
+		return;
+	fswan_netlink_flower_filter_drain();
+	flower_side_cleanup(iface, *side_pp);
+	FREE(*side_pp);
+	*side_pp = NULL;
+}
+
 void
-fswan_flower_disable(struct interface *iface)
+fswan_flower_disable_out(struct interface *iface)
 {
 	if (!iface->flower)
 		return;
+	flower_disable_side(iface, &iface->flower->out);
+	flower_wrapper_release_if_empty(iface);
+}
 
-	/* Drain pending install ACKs first because their callbacks would
-	 * rb_add into the tree we are about to walk. */
-	fswan_netlink_flower_filter_drain();
+void
+fswan_flower_disable_in(struct interface *iface)
+{
+	if (!iface->flower)
+		return;
+	flower_disable_side(iface, &iface->flower->in);
+	flower_wrapper_release_if_empty(iface);
+}
 
-	flower_side_cleanup(iface, &iface->flower->out);
-	if (iface->flower->in) {
-		flower_side_cleanup(iface, iface->flower->in);
-		FREE(iface->flower->in);
-		iface->flower->in = NULL;
-	}
-
-	fswan_netlink_flower_clsact(iface->ifindex, false);
-	FREE(iface->flower);
-	iface->flower = NULL;
+void
+fswan_flower_disable(struct interface *iface)
+{
+	fswan_flower_disable_out(iface);
+	fswan_flower_disable_in(iface);
 }
 
 int
@@ -1097,8 +1173,8 @@ fswan_flower_policy_counters(struct interface *iface,
 	if (!iface->flower)
 		return false;
 
-	if (p->dir == XFRM_POLICY_OUT)
-		side = &iface->flower->out;
+	if (p->dir == XFRM_POLICY_OUT && iface->flower->out)
+		side = iface->flower->out;
 	else if (p->dir == XFRM_POLICY_IN && iface->flower->in)
 		side = iface->flower->in;
 	else

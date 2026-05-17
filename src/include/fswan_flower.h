@@ -57,15 +57,20 @@ struct fswan_flower_side {
 };
 
 struct fswan_flower {
-	struct fswan_flower_side	out;	/* always present */
-	struct fswan_flower_side	*in;	/* allocated on inbound probe success */
+	struct fswan_flower_side	*out;	/* NULL when outbound XDP fallback */
+	struct fswan_flower_side	*in;	/* NULL when inbound XDP fallback */
 	bool				decrement_ttl;
 };
 
 
-/* Public surface */
-int fswan_flower_enable(struct interface *iface, uint16_t chain);
-void fswan_flower_disable(struct interface *iface);
+/* Public surface. Outbound and inbound are independent: either can run on
+ * flower while the other falls back to XDP. The wrapper struct comes and
+ * goes with the first/last active side. */
+int fswan_flower_enable_out(struct interface *iface);
+int fswan_flower_enable_in(struct interface *iface, uint16_t chain);
+void fswan_flower_disable_out(struct interface *iface);
+void fswan_flower_disable_in(struct interface *iface);
+void fswan_flower_disable(struct interface *iface);	/* full teardown */
 int fswan_flower_xfrm_action(int action, struct interface *iface,
 			     struct xfrm_policy *p);
 bool fswan_flower_policy_counters(struct interface *iface,

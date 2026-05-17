@@ -450,11 +450,10 @@ fswan_bpf_xfrm_action(int action, struct xfrm_policy *p)
 	if (!iface)
 		return 0;
 
-	/* flower-mode owns outbound when enabled. Inbound rides the
-	 * same backend only when the post-decrypt probe succeeded,
-	 * otherwise it falls back to XDP below. */
+	/* Each direction picks flower independently, XDP fallback otherwise. */
 	if (iface->flower) {
-		if (__test_bit(XFRM_POLICY_FL_OUT_BIT, &p->flags))
+		if (__test_bit(XFRM_POLICY_FL_OUT_BIT, &p->flags) &&
+		    iface->flower->out)
 			return fswan_flower_xfrm_action(action, iface, p);
 		if (__test_bit(XFRM_POLICY_FL_IN_BIT, &p->flags) &&
 		    iface->flower->in)
