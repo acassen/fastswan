@@ -36,6 +36,7 @@
 #include <linux/if_ether.h>
 #include <linux/tc_act/tc_pedit.h>
 #include <linux/tc_act/tc_mirred.h>
+#include <linux/tc_act/tc_vlan.h>
 
 /* local includes */
 #include "memory.h"
@@ -86,6 +87,7 @@ struct flower_dump_ctx {
 struct flower_pending {
 	uint32_t			seq;
 	int				ifindex;
+	uint16_t			chain;
 	struct fswan_flower_sel		sel;
 	fswan_flower_install_cb		cb;
 	void				*ctx;
@@ -93,6 +95,7 @@ struct flower_pending {
 
 struct flower_reconcile_iface {
 	int				ifindex;
+	uint16_t			chain;
 	struct fswan_flower_sel		*sels;
 	int				n_sels;
 	int				cap;
@@ -105,6 +108,20 @@ struct flower_reconcile_iface {
  */
 static struct flower_pending pipeline[FLOWER_PIPELINE_MAX];
 static int pipeline_n;
+
+static void
+flower_pipeline_push(uint32_t seq, int ifindex, uint16_t chain,
+		     const struct fswan_flower_sel *sel,
+		     fswan_flower_install_cb cb, void *ctx)
+{
+	pipeline[pipeline_n].seq = seq;
+	pipeline[pipeline_n].ifindex = ifindex;
+	pipeline[pipeline_n].chain = chain;
+	pipeline[pipeline_n].sel = *sel;
+	pipeline[pipeline_n].cb = cb;
+	pipeline[pipeline_n].ctx = ctx;
+	pipeline_n++;
+}
 
 
 /*
@@ -123,6 +140,18 @@ static void
 addattr_nest_end(struct nlmsghdr *n, struct rtattr *nest)
 {
 	nest->rta_len = (char *) NLMSG_TAIL(n) - (char *) nest;
+}
+
+/*
+ *	TCA_CHAIN is mandatory on every TC request. Without it the kernel
+ *	walks chain 0 and a non-zero chain read returns -ENOENT silently.
+ */
+static void
+addattr_tca_chain(struct nlmsghdr *n, size_t maxlen, uint16_t chain)
+{
+	__u32 chain32 = chain;
+
+	addattr_l(n, maxlen, TCA_CHAIN, &chain32, sizeof(chain32));
 }
 
 
@@ -310,6 +339,92 @@ addattr_action_mirred(struct nlmsghdr *n, size_t maxlen, int prio,
 
 
 /*
+ *	pedit "set dmac+smac" extended action. mask=0 yields a full-word
+ *	override under the SET cmd.
+ */
+static void
+addattr_pedit_eth_set(struct nlmsghdr *n, size_t maxlen,
+		      const uint8_t src_mac[ETH_ALEN],
+		      const uint8_t dst_mac[ETH_ALEN])
+{
+	struct {
+		struct tc_pedit_sel	sel;
+		struct tc_pedit_key	keys[3];
+	} parms = {
+		.sel.action	= TC_ACT_PIPE,
+		.sel.nkeys	= 3,
+		.keys[0].off	= 0,
+		.keys[1].off	= 4,
+		.keys[2].off	= 8,
+	};
+	struct rtattr *kex_nest, *key_nest;
+	__u16 htype = TCA_PEDIT_KEY_EX_HDR_TYPE_ETH;
+	__u16 cmd = TCA_PEDIT_KEY_EX_CMD_SET;
+	uint8_t hdr[12];
+	int i;
+
+	memcpy(&hdr[0], dst_mac, ETH_ALEN);
+	memcpy(&hdr[ETH_ALEN], src_mac, ETH_ALEN);
+	memcpy(&parms.keys[0].val, &hdr[0], 4);
+	memcpy(&parms.keys[1].val, &hdr[4], 4);
+	memcpy(&parms.keys[2].val, &hdr[8], 4);
+
+	addattr_l(n, maxlen, TCA_PEDIT_PARMS_EX, &parms, sizeof(parms));
+
+	kex_nest = addattr_nest(n, maxlen, TCA_PEDIT_KEYS_EX | NLA_F_NESTED);
+	for (i = 0; i < 3; i++) {
+		key_nest = addattr_nest(n, maxlen,
+					TCA_PEDIT_KEY_EX | NLA_F_NESTED);
+		addattr_l(n, maxlen, TCA_PEDIT_KEY_EX_HTYPE,
+			  &htype, sizeof(htype));
+		addattr_l(n, maxlen, TCA_PEDIT_KEY_EX_CMD,
+			  &cmd, sizeof(cmd));
+		addattr_nest_end(n, key_nest);
+	}
+	addattr_nest_end(n, kex_nest);
+}
+
+static void
+addattr_action_pedit_eth(struct nlmsghdr *n, size_t maxlen, int prio,
+			 const uint8_t src_mac[ETH_ALEN],
+			 const uint8_t dst_mac[ETH_ALEN])
+{
+	struct rtattr *act_nest, *opts_nest;
+
+	act_nest = flower_action_open(n, maxlen, prio, "pedit");
+	opts_nest = addattr_nest(n, maxlen, TCA_ACT_OPTIONS | NLA_F_NESTED);
+	addattr_pedit_eth_set(n, maxlen, src_mac, dst_mac);
+	addattr_nest_end(n, opts_nest);
+	addattr_nest_end(n, act_nest);
+}
+
+
+/*
+ *	vlan "push" action. Maps to MLX5_REFORMAT_TYPE_INSERT_HDR on NIC RX.
+ */
+static void
+addattr_action_vlan_push(struct nlmsghdr *n, size_t maxlen, int prio,
+			 uint16_t vlan_id)
+{
+	struct tc_vlan parms = {
+		.action		= TC_ACT_PIPE,
+		.v_action	= TCA_VLAN_ACT_PUSH,
+	};
+	__be16 proto = htons(ETH_P_8021Q);
+	struct rtattr *act_nest, *opts_nest;
+
+	act_nest = flower_action_open(n, maxlen, prio, "vlan");
+	opts_nest = addattr_nest(n, maxlen, TCA_ACT_OPTIONS | NLA_F_NESTED);
+	addattr_l(n, maxlen, TCA_VLAN_PARMS, &parms, sizeof(parms));
+	addattr_l(n, maxlen, TCA_VLAN_PUSH_VLAN_ID, &vlan_id, sizeof(vlan_id));
+	addattr_l(n, maxlen, TCA_VLAN_PUSH_VLAN_PROTOCOL,
+		  &proto, sizeof(proto));
+	addattr_nest_end(n, opts_nest);
+	addattr_nest_end(n, act_nest);
+}
+
+
+/*
  *	IPv4 + optional VLAN flower match keys
  */
 static void
@@ -370,13 +485,21 @@ fswan_netlink_flower_clsact(int ifindex, bool add)
 
 
 /*
- *	RTM_NEWTFILTER builder shared by sync and pipelined adds. Returns
- *	the seq so the pipelined path can match the ACK later.
+ *	Direction-specific action chain builder. Returns the next prio so
+ *	flower_filter_send_msg can append the trailing mirred-redirect.
+ */
+typedef int (*flower_build_actions_cb)(struct nlmsghdr *n, size_t maxlen,
+				       int prio, const void *ctx);
+
+/*
+ *	RTM_NEWTFILTER builder shared by both directions. Returns the seq
+ *	so the pipelined path can match the ACK later.
  */
 static int
-flower_filter_send_msg(int ifindex, uint32_t handle,
-		       const struct fswan_flower_sel *sel,
-		       uint16_t vlan_id, int redirect_ifindex,
+flower_filter_send_msg(int ifindex, uint16_t chain, uint32_t handle,
+		       const struct fswan_flower_sel *sel, uint16_t vlan_id,
+		       int redirect_ifindex,
+		       flower_build_actions_cb build_actions, const void *actx,
 		       uint32_t *seq_out)
 {
 	__be16 protocol = htons(vlan_id ? ETH_P_8021Q : ETH_P_IP);
@@ -397,10 +520,10 @@ flower_filter_send_msg(int ifindex, uint32_t handle,
 		.t.tcm_handle = handle,
 	};
 	struct rtattr *opts_nest, *act_nest;
-	const char *kind = "flower";
-	int err;
+	int err, prio;
 
-	addattr_l(&req.nlh, sizeof(req), TCA_KIND, kind, strlen(kind) + 1);
+	addattr_tca_chain(&req.nlh, sizeof(req), chain);
+	addattr_l(&req.nlh, sizeof(req), TCA_KIND, "flower", sizeof("flower"));
 
 	opts_nest = addattr_nest(&req.nlh, sizeof(req),
 				 TCA_OPTIONS | NLA_F_NESTED);
@@ -410,8 +533,8 @@ flower_filter_send_msg(int ifindex, uint32_t handle,
 
 	act_nest = addattr_nest(&req.nlh, sizeof(req),
 				TCA_FLOWER_ACT | NLA_F_NESTED);
-	addattr_action_pedit_ttl(&req.nlh, sizeof(req), 1);
-	addattr_action_mirred(&req.nlh, sizeof(req), 2, redirect_ifindex);
+	prio = build_actions(&req.nlh, sizeof(req), 1, actx);
+	addattr_action_mirred(&req.nlh, sizeof(req), prio, redirect_ifindex);
 	addattr_nest_end(&req.nlh, act_nest);
 
 	addattr_nest_end(&req.nlh, opts_nest);
@@ -424,8 +547,28 @@ flower_filter_send_msg(int ifindex, uint32_t handle,
 	return 0;
 }
 
+static int
+flower_build_actions_out(struct nlmsghdr *n, size_t maxlen, int prio,
+			 __attribute__((unused)) const void *ctx)
+{
+	addattr_action_pedit_ttl(n, maxlen, prio++);
+	return prio;
+}
+
+static int
+flower_build_actions_in(struct nlmsghdr *n, size_t maxlen, int prio,
+			const void *ctx)
+{
+	const struct fswan_flower_inbound_args *a = ctx;
+
+	addattr_action_pedit_eth(n, maxlen, prio++, a->src_mac, a->dst_mac);
+	if (a->push_vlan_id)
+		addattr_action_vlan_push(n, maxlen, prio++, a->push_vlan_id);
+	return prio;
+}
+
 int
-fswan_netlink_flower_filter_add(int ifindex, uint32_t handle,
+fswan_netlink_flower_filter_add(int ifindex, uint16_t chain, uint32_t handle,
 				const struct fswan_flower_sel *sel,
 				uint16_t vlan_id, int redirect_ifindex)
 {
@@ -437,15 +580,17 @@ fswan_netlink_flower_filter_add(int ifindex, uint32_t handle,
 	if (pipeline_n)
 		fswan_netlink_flower_filter_drain();
 
-	err = flower_filter_send_msg(ifindex, handle, sel, vlan_id,
-				     redirect_ifindex, &seq);
+	err = flower_filter_send_msg(ifindex, chain, handle, sel, vlan_id,
+				     redirect_ifindex,
+				     flower_build_actions_out, NULL, &seq);
 	if (err < 0)
 		return err;
 	return flower_recv(seq, NULL, NULL);
 }
 
 int
-fswan_netlink_flower_filter_add_pipelined(int ifindex, uint32_t handle,
+fswan_netlink_flower_filter_add_pipelined(int ifindex, uint16_t chain,
+					  uint32_t handle,
 					  const struct fswan_flower_sel *sel,
 					  uint16_t vlan_id,
 					  int redirect_ifindex,
@@ -462,19 +607,59 @@ fswan_netlink_flower_filter_add_pipelined(int ifindex, uint32_t handle,
 			return err;
 	}
 
-	err = flower_filter_send_msg(ifindex, handle, sel, vlan_id,
-				     redirect_ifindex, &seq);
+	err = flower_filter_send_msg(ifindex, chain, handle, sel, vlan_id,
+				     redirect_ifindex,
+				     flower_build_actions_out, NULL, &seq);
 	if (err < 0)
 		return err;
 
-	pipeline[pipeline_n].seq = seq;
-	pipeline[pipeline_n].ifindex = ifindex;
-	pipeline[pipeline_n].sel = *sel;
-	pipeline[pipeline_n].cb = cb;
-	pipeline[pipeline_n].ctx = ctx;
-	pipeline_n++;
+	flower_pipeline_push(seq, ifindex, chain, sel, cb, ctx);
 	return 0;
 }
+
+int
+fswan_netlink_flower_filter_add_in(int ifindex,
+				   const struct fswan_flower_inbound_args *a)
+{
+	uint32_t seq;
+	int err;
+
+	if (pipeline_n)
+		fswan_netlink_flower_filter_drain();
+
+	err = flower_filter_send_msg(ifindex, a->chain, a->handle, &a->sel, 0,
+				     a->redirect_ifindex,
+				     flower_build_actions_in, a, &seq);
+	if (err < 0)
+		return err;
+	return flower_recv(seq, NULL, NULL);
+}
+
+int
+fswan_netlink_flower_filter_add_in_pipelined(int ifindex,
+					     const struct fswan_flower_inbound_args *a,
+					     fswan_flower_install_cb cb,
+					     void *ctx)
+{
+	uint32_t seq;
+	int err;
+
+	if (pipeline_n == FLOWER_PIPELINE_MAX) {
+		err = fswan_netlink_flower_filter_drain();
+		if (err)
+			return err;
+	}
+
+	err = flower_filter_send_msg(ifindex, a->chain, a->handle, &a->sel, 0,
+				     a->redirect_ifindex,
+				     flower_build_actions_in, a, &seq);
+	if (err < 0)
+		return err;
+
+	flower_pipeline_push(seq, ifindex, a->chain, &a->sel, cb, ctx);
+	return 0;
+}
+
 
 /*
  *	Comparator for qsort/bsearch over fswan_flower_sel arrays. Lex
@@ -522,12 +707,13 @@ flower_drain_stale(void)
 }
 
 static struct flower_reconcile_iface *
-flower_reconcile_find(struct flower_reconcile_iface *ifs, int n, int ifindex)
+flower_reconcile_find(struct flower_reconcile_iface *ifs, int n, int ifindex,
+		      uint16_t chain)
 {
 	int i;
 
 	for (i = 0; i < n; i++) {
-		if (ifs[i].ifindex == ifindex)
+		if (ifs[i].ifindex == ifindex && ifs[i].chain == chain)
 			return &ifs[i];
 	}
 	return NULL;
@@ -562,11 +748,14 @@ flower_reconcile_collect_ifaces(struct flower_reconcile_iface *ifs, int max,
 	int i;
 
 	for (i = 0; i < n; i++) {
-		if (flower_reconcile_find(ifs, n_ifs, saved[i].ifindex))
+		if (flower_reconcile_find(ifs, n_ifs, saved[i].ifindex,
+					  saved[i].chain))
 			continue;
 		if (n_ifs == max)
 			break;
-		ifs[n_ifs++].ifindex = saved[i].ifindex;
+		ifs[n_ifs].ifindex = saved[i].ifindex;
+		ifs[n_ifs].chain = saved[i].chain;
+		n_ifs++;
 	}
 	return n_ifs;
 }
@@ -574,7 +763,8 @@ flower_reconcile_collect_ifaces(struct flower_reconcile_iface *ifs, int max,
 static void
 flower_reconcile_dump_iface(struct flower_reconcile_iface *r)
 {
-	fswan_netlink_flower_dump(r->ifindex, flower_reconcile_dump_cb, r);
+	fswan_netlink_flower_dump(r->ifindex, r->chain,
+				  flower_reconcile_dump_cb, r);
 	if (r->n_sels > 1)
 		qsort(r->sels, r->n_sels, sizeof(*r->sels), flower_sel_qcmp);
 }
@@ -585,7 +775,7 @@ flower_reconcile_present(struct flower_reconcile_iface *ifs, int n,
 {
 	struct flower_reconcile_iface *r;
 
-	r = flower_reconcile_find(ifs, n, p->ifindex);
+	r = flower_reconcile_find(ifs, n, p->ifindex, p->chain);
 	if (!r || !r->n_sels)
 		return false;
 	return bsearch(&p->sel, r->sels, r->n_sels, sizeof(*r->sels),
@@ -716,7 +906,7 @@ fswan_netlink_flower_filter_drain(void)
  *	regardless of the protocol it was installed with.
  */
 int
-fswan_netlink_flower_filter_del(int ifindex, uint32_t handle)
+fswan_netlink_flower_filter_del(int ifindex, uint16_t chain, uint32_t handle)
 {
 	struct {
 		struct nlmsghdr	nlh;
@@ -733,6 +923,7 @@ fswan_netlink_flower_filter_del(int ifindex, uint32_t handle)
 		.t.tcm_handle = handle,
 	};
 
+	addattr_tca_chain(&req.nlh, sizeof(req), chain);
 	addattr_l(&req.nlh, sizeof(req), TCA_KIND, "flower", sizeof("flower"));
 	return flower_send_sync(&req.nlh, NULL, NULL);
 }
@@ -845,7 +1036,7 @@ flower_stats_cb(struct nlmsghdr *h, void *arg)
 }
 
 int
-fswan_netlink_flower_filter_stats(int ifindex, uint32_t handle,
+fswan_netlink_flower_filter_stats(int ifindex, uint16_t chain, uint32_t handle,
 				  uint64_t *pkts, uint64_t *bytes)
 {
 	struct {
@@ -865,6 +1056,7 @@ fswan_netlink_flower_filter_stats(int ifindex, uint32_t handle,
 	struct flower_stats_ctx ctx = {};
 	int err;
 
+	addattr_tca_chain(&req.nlh, sizeof(req), chain);
 	addattr_l(&req.nlh, sizeof(req), TCA_KIND, "flower", sizeof("flower"));
 
 	err = flower_send_sync(&req.nlh, flower_stats_cb, &ctx);
@@ -911,7 +1103,8 @@ flower_dump_msg_cb(struct nlmsghdr *h, void *arg)
 }
 
 int
-fswan_netlink_flower_dump(int ifindex, fswan_flower_dump_cb cb, void *ctx)
+fswan_netlink_flower_dump(int ifindex, uint16_t chain,
+			  fswan_flower_dump_cb cb, void *ctx)
 {
 	struct {
 		struct nlmsghdr	nlh;
@@ -928,6 +1121,7 @@ fswan_netlink_flower_dump(int ifindex, fswan_flower_dump_cb cb, void *ctx)
 	};
 	struct flower_dump_ctx d = { .cb = cb, .ctx = ctx };
 
+	addattr_tca_chain(&req.nlh, sizeof(req), chain);
 	addattr_l(&req.nlh, sizeof(req), TCA_KIND, "flower", sizeof("flower"));
 	return flower_send_sync(&req.nlh, flower_dump_msg_cb, &d);
 }

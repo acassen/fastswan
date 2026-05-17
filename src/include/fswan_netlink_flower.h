@@ -25,6 +25,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <linux/types.h>
+#include <linux/if_ether.h>
 
 
 /* Single shared TC priority for every flower rule fastswan installs.
@@ -41,6 +42,18 @@ struct fswan_flower_sel {
 	uint8_t			prefixlen_d;
 };
 
+/* Inbound (post-decrypt) install request, boxed because seven positional
+ * args invite mistakes at call sites. */
+struct fswan_flower_inbound_args {
+	uint16_t		chain;
+	uint32_t		handle;
+	struct fswan_flower_sel	sel;
+	uint8_t			dst_mac[ETH_ALEN];
+	uint8_t			src_mac[ETH_ALEN];
+	uint16_t		push_vlan_id;	/* 0 = no vlan push */
+	int			redirect_ifindex;
+};
+
 
 typedef void (*fswan_flower_dump_cb)(const struct fswan_flower_sel *sel,
 				     uint64_t pkts, uint64_t bytes,
@@ -53,19 +66,26 @@ int fswan_netlink_flower_init(void);
 int fswan_netlink_flower_destroy(void);
 
 int fswan_netlink_flower_clsact(int ifindex, bool add);
-int fswan_netlink_flower_filter_add(int ifindex, uint32_t handle,
+int fswan_netlink_flower_filter_add(int ifindex, uint16_t chain, uint32_t handle,
 				    const struct fswan_flower_sel *sel,
 				    uint16_t vlan_id, int redirect_ifindex);
-int fswan_netlink_flower_filter_del(int ifindex, uint32_t handle);
-int fswan_netlink_flower_filter_stats(int ifindex, uint32_t handle,
+int fswan_netlink_flower_filter_del(int ifindex, uint16_t chain, uint32_t handle);
+int fswan_netlink_flower_filter_stats(int ifindex, uint16_t chain, uint32_t handle,
 				      uint64_t *pkts, uint64_t *bytes);
-int fswan_netlink_flower_dump(int ifindex,
+int fswan_netlink_flower_dump(int ifindex, uint16_t chain,
 			      fswan_flower_dump_cb cb, void *ctx);
 
-int fswan_netlink_flower_filter_add_pipelined(int ifindex, uint32_t handle,
+int fswan_netlink_flower_filter_add_pipelined(int ifindex, uint16_t chain,
+					      uint32_t handle,
 					      const struct fswan_flower_sel *sel,
 					      uint16_t vlan_id,
 					      int redirect_ifindex,
 					      fswan_flower_install_cb cb,
 					      void *ctx);
+int fswan_netlink_flower_filter_add_in(int ifindex,
+				       const struct fswan_flower_inbound_args *a);
+int fswan_netlink_flower_filter_add_in_pipelined(int ifindex,
+						 const struct fswan_flower_inbound_args *a,
+						 fswan_flower_install_cb cb,
+						 void *ctx);
 int fswan_netlink_flower_filter_drain(void);

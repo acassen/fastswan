@@ -63,6 +63,10 @@
 	(((__eth_addr)[0] & (__eth_addr)[1] & (__eth_addr)[2] &		\
 	  (__eth_addr)[3] & (__eth_addr)[4] & (__eth_addr)[5]) == 0xff)
 
+#define ETHER_IS_ZERO(__eth_addr)					\
+	(((__eth_addr)[0] | (__eth_addr)[1] | (__eth_addr)[2] |		\
+	  (__eth_addr)[3] | (__eth_addr)[4] | (__eth_addr)[5]) == 0)
+
 
 /* Prototypes defs */
 uint16_t in_csum(uint16_t *addr, int, uint16_t csum);
