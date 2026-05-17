@@ -38,6 +38,7 @@
 #include "fswan_netlink.h"
 #include "fswan_bpf_prog.h"
 #include "fswan_bpf_xfrm.h"
+#include "fswan_flower.h"
 #include "fswan_hairpin.h"
 
 
@@ -194,6 +195,11 @@ fswan_hairpin_set(struct interface *iface, uint32_t nh_addr)
 	 */
 	fswan_netlink_neigh_lookup(iface->hairpin->via_addr, oif);
 
+	/* Flower-in rules pick the hairpin tier when
+	 * iface->hairpin->resolved is set, so propagate the new state
+	 * into live inbound rules. */
+	fswan_flower_inbound_rebuild(iface);
+
 	return iface->hairpin->resolved ? 0 : -1;
 }
 
@@ -206,6 +212,9 @@ fswan_hairpin_clear(struct interface *iface)
 	fswan_hairpin_unpublish(iface);
 	FREE(iface->hairpin);
 	iface->hairpin = NULL;
+
+	/* Inbound rules that resolved via hairpin must switch to per-policy. */
+	fswan_flower_inbound_rebuild(iface);
 }
 
 int

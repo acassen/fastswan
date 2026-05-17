@@ -37,18 +37,33 @@ struct fswan_flower_rule {
 	struct rb_node		node;
 	uint32_t		handle;
 	struct fswan_flower_sel	sel;
-	uint16_t		vlan_id;
+
+	/* outbound */
+	uint16_t		match_vlan_id;
+
+	/* inbound */
+	uint8_t			dst_mac[ETH_ALEN];
+	uint8_t			src_mac[ETH_ALEN];
+	uint16_t		push_vlan_id;
+	uint32_t		nh_addr;	/* via, same value for hairpin-backed */
+	int			oif;
+};
+
+struct fswan_flower_side {
+	uint32_t		next_handle;	/* monotonic, starts at 1 */
+	struct rb_root		rules;
+	uint16_t		chain;		/* 0 for out, configured value for in */
+	bool			warmed_up;
 };
 
 struct fswan_flower {
-	uint32_t		next_handle;	/* monotonic, starts at 1 */
-	struct rb_root		rules;
-	bool			warmed_up;	/* hairpin-pin rule installed */
+	struct fswan_flower_side	out;	/* always present */
+	struct fswan_flower_side	*in;	/* allocated on inbound probe success */
 };
 
 
 /* Public surface */
-int fswan_flower_enable(struct interface *iface);
+int fswan_flower_enable(struct interface *iface, uint16_t chain);
 void fswan_flower_disable(struct interface *iface);
 int fswan_flower_xfrm_action(int action, struct interface *iface,
 			     struct xfrm_policy *p);
@@ -57,3 +72,9 @@ bool fswan_flower_policy_counters(struct interface *iface,
 				  uint64_t *pkts, uint64_t *bytes);
 void fswan_flower_counter_cache_begin(void);
 void fswan_flower_counter_cache_end(void);
+
+/* Event hooks called from the netlink filter and from fswan_hairpin. */
+void fswan_flower_neigh_update(uint32_t addr, const uint8_t *lladdr,
+			       int ifindex);
+void fswan_flower_neigh_delete(uint32_t addr);
+void fswan_flower_inbound_rebuild(struct interface *iface);

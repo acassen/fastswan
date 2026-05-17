@@ -46,6 +46,7 @@
 #include "fswan_netlink.h"
 #include "fswan_netlink_flower.h"
 #include "fswan_hairpin.h"
+#include "fswan_flower.h"
 #include "fswan_bpf_xfrm.h"
 
 /* Local data */
@@ -490,6 +491,7 @@ netlink_neigh_filter(__attribute__((unused)) struct sockaddr_nl *snl,
 
 	if (h->nlmsg_type == RTM_DELNEIGH) {
 		fswan_hairpin_neigh_delete(addr);
+		fswan_flower_neigh_delete(addr);
 		return 0;
 	}
 
@@ -498,6 +500,8 @@ netlink_neigh_filter(__attribute__((unused)) struct sockaddr_nl *snl,
 
 	fswan_hairpin_neigh_update(addr, RTA_DATA(tb[NDA_LLADDR]),
 				   r->ndm_ifindex);
+	fswan_flower_neigh_update(addr, RTA_DATA(tb[NDA_LLADDR]),
+				  r->ndm_ifindex);
 	return 0;
 }
 

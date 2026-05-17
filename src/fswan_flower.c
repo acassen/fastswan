@@ -24,6 +24,7 @@
 /* system includes */
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <linux/xfrm.h>
@@ -31,6 +32,7 @@
 /* local includes */
 #include "memory.h"
 #include "logger.h"
+#include "bitops.h"
 #include "rbtree_api.h"
 #include "ethtool.h"
 #include "inet_utils.h"
@@ -46,12 +48,26 @@ extern struct data *daemon_data;
 
 #define FLOWER_DRIVER_MLX5	"mlx5_core"
 
+/* Shared IDR sentinels. Same value across out and in because the kernel
+ * IDR is scoped per (chain, prio) and our chains differ between sides. */
+#define FLOWER_PROBE_HANDLE	0x7ffffffeU
+#define FLOWER_WARMUP_HANDLE	0x7fffffffU
+
+/* Never-match selector used by probe and warmup-pin rules. */
+static const struct fswan_flower_sel flower_never_match_sel = {
+	.saddr		= 0xffffffff,
+	.daddr		= 0xffffffff,
+	.prefixlen_s	= 32,
+	.prefixlen_d	= 32,
+};
+
 
 /*
  *	Type declarations
  */
 struct flower_cache_entry {
 	int			ifindex;
+	uint16_t		chain;
 	struct fswan_flower_sel	sel;
 	uint64_t		pkts;
 	uint64_t		bytes;
@@ -66,6 +82,7 @@ struct flower_cache {
 struct flower_cache_build_ctx {
 	struct flower_cache	*c;
 	int			ifindex;
+	uint16_t		chain;
 };
 
 struct flower_replay_state {
@@ -83,6 +100,7 @@ struct flower_replay_ctx {
 struct flower_pending_install {
 	struct fswan_flower_rule	*r;
 	struct interface		*iface;
+	struct fswan_flower_side	*side;
 	struct flower_replay_state	*state;
 };
 
@@ -95,7 +113,7 @@ static struct flower_cache *show_cache;
 
 
 /*
- *	Egress resolution
+ *	Outbound match-VLAN resolution
  */
 static int
 flower_egress_resolve(struct interface *iface, struct xfrm_policy *p,
@@ -133,6 +151,75 @@ flower_egress_resolve(struct interface *iface, struct xfrm_policy *p,
 
 
 /*
+ *	Inbound two-phase resolver. Two phases so the hard-fail branch
+ *	can return before any rb-tree commit, leaving the rule findable
+ *	by r->nh_addr when the RTM_NEWNEIGH callback fires. Hairpin tier
+ *	mirrors XDP's xfrm_hairpin_xmit shortcut.
+ */
+static int
+flower_resolve_in_prep(struct interface *iface, struct fswan_flower_rule *r)
+{
+	struct interface *neigh;
+	uint32_t gw = 0;
+	int oif = 0;
+
+	memcpy(r->src_mac, iface->hw_addr, ETH_ALEN);
+
+	if (iface->hairpin && iface->hairpin->resolved) {
+		r->oif		= iface->ifindex;
+		r->push_vlan_id	= iface->hairpin->vlan_id;
+		r->nh_addr	= iface->hairpin->via_addr;
+		return 0;
+	}
+
+	if (fswan_netlink_route_lookup(r->sel.daddr, &gw, &oif) < 0) {
+		log_message(LOG_INFO, "flower: %s: no route to dst"
+				      " %u.%u.%u.%u/%d"
+				    , iface->ifname
+				    , NIPQUAD(r->sel.daddr), r->sel.prefixlen_d);
+		return -1;
+	}
+
+	if (oif == iface->ifindex) {
+		r->oif		= oif;
+		r->push_vlan_id	= 0;
+		r->nh_addr	= gw ? gw : r->sel.daddr;
+		return 0;
+	}
+
+	neigh = fswan_if_get_by_ifindex(oif, true);
+	if (neigh && neigh->link_iface == iface) {
+		r->oif		= oif;
+		r->push_vlan_id	= neigh->vlan_id;
+		r->nh_addr	= gw ? gw : r->sel.daddr;
+		return 0;
+	}
+
+	log_message(LOG_INFO, "flower: %s: dst %u.%u.%u.%u/%d via oif %d is"
+			      " neither this iface nor a VLAN child of it"
+			    , iface->ifname
+			    , NIPQUAD(r->sel.daddr), r->sel.prefixlen_d, oif);
+	return -1;
+}
+
+static int
+flower_resolve_in_neigh(struct interface *iface, struct fswan_flower_rule *r)
+{
+	if (iface->hairpin && iface->hairpin->resolved) {
+		memcpy(r->dst_mac, iface->hairpin->hw_addr, ETH_ALEN);
+		return 0;
+	}
+
+	/* fswan_flower_neigh_update fills r->dst_mac inline when the
+	 * kernel had the LL cached, otherwise the rule parks on -EAGAIN
+	 * and the later RTM_NEWNEIGH fires the install. */
+	memset(r->dst_mac, 0, ETH_ALEN);
+	fswan_netlink_neigh_lookup(r->nh_addr, r->oif);
+	return ETHER_IS_ZERO(r->dst_mac) ? -EAGAIN : 0;
+}
+
+
+/*
  *	Rule rbtree helpers, keyed on the selector tuple.
  */
 static int
@@ -166,7 +253,7 @@ flower_rule_less(struct rb_node *a, const struct rb_node *b)
 }
 
 static struct fswan_flower_rule *
-flower_rule_find(struct interface *iface, const struct xfrm_policy *p)
+flower_rule_find(struct fswan_flower_side *side, const struct xfrm_policy *p)
 {
 	const struct fswan_flower_sel key = {
 		.saddr		= p->saddr.a4,
@@ -176,7 +263,7 @@ flower_rule_find(struct interface *iface, const struct xfrm_policy *p)
 	};
 	struct rb_node *n;
 
-	n = rb_find(&key, &iface->flower->rules, flower_rule_cmp);
+	n = rb_find(&key, &side->rules, flower_rule_cmp);
 	if (!n)
 		return NULL;
 	return rb_entry(n, struct fswan_flower_rule, node);
@@ -184,38 +271,26 @@ flower_rule_find(struct interface *iface, const struct xfrm_policy *p)
 
 static void
 flower_rule_init_from_policy(struct fswan_flower_rule *r, uint32_t handle,
-			     uint16_t vlan_id, const struct xfrm_policy *p)
+			     const struct xfrm_policy *p)
 {
 	r->handle = handle;
-	r->vlan_id = vlan_id;
 	r->sel.saddr = p->saddr.a4;
 	r->sel.daddr = p->daddr.a4;
 	r->sel.prefixlen_s = p->prefixlen_s;
 	r->sel.prefixlen_d = p->prefixlen_d;
 }
 
-static void
-flower_log_installed(const struct interface *iface,
-		     const struct fswan_flower_rule *r)
-{
-	log_message(LOG_INFO, "flower: flower-xfrm: adding XFRM-Policy="
-			      "{src:%u.%u.%u.%u/%d, dst:%u.%u.%u.%u/%d,"
-			      " ifindex:%d, dir:out, vlan:%u, handle:0x%x}"
-			    , NIPQUAD(r->sel.saddr), r->sel.prefixlen_s
-			    , NIPQUAD(r->sel.daddr), r->sel.prefixlen_d
-			    , iface->ifindex, r->vlan_id, r->handle);
-}
-
-
-static void flower_warmup_pin(struct interface *iface, uint16_t vlan_id);
+static void flower_warmup_pin_out(struct interface *iface, uint16_t vlan_id);
+static void flower_warmup_pin_in(struct interface *iface, uint16_t chain,
+				 uint16_t push_vlan_id);
 
 
 /*
- *	Pipelined dispatch so per-policy kernel latency stays off the XFRM
- *	reactor. rb-tree commits and hairpin warmup land in the ACK callback.
+ *	Outbound install ACK callback. Rule is not in the rb-tree yet,
+ *	so success commits it and failure just frees the allocation.
  */
 static void
-flower_install_done(int err, void *ctx)
+flower_install_done_out(int err, void *ctx)
 {
 	struct flower_pending_install *pi = ctx;
 
@@ -234,8 +309,52 @@ flower_install_done(int err, void *ctx)
 		goto err;
 	}
 
-	rb_add(&pi->r->node, &pi->iface->flower->rules, flower_rule_less);
-	flower_log_installed(pi->iface, pi->r);
+	rb_add(&pi->r->node, &pi->side->rules, flower_rule_less);
+	log_message(LOG_INFO, "flower: flower-xfrm: adding XFRM-Policy="
+			      "{src:%u.%u.%u.%u/%d, dst:%u.%u.%u.%u/%d,"
+			      " ifindex:%d, dir:out, vlan:%u, handle:0x%x}"
+			    , NIPQUAD(pi->r->sel.saddr), pi->r->sel.prefixlen_s
+			    , NIPQUAD(pi->r->sel.daddr), pi->r->sel.prefixlen_d
+			    , pi->iface->ifindex, pi->r->match_vlan_id
+			    , pi->r->handle);
+	if (pi->state)
+		pi->state->succeeded++;
+ err:
+	FREE(pi);
+}
+
+/*
+ *	Inbound install ACK callback. Rule is already in the rb-tree
+ *	(committed before the neigh phase), so failure must rb_erase first.
+ */
+static void
+flower_install_done_in(int err, void *ctx)
+{
+	struct flower_pending_install *pi = ctx;
+
+	if (err) {
+		log_message(LOG_INFO, "flower: %s: inbound skip_sw filter add"
+				      " failed for handle:0x%x"
+				      " src:%u.%u.%u.%u/%d dst:%u.%u.%u.%u/%d"
+				      " (errno=%d %s)"
+				    , pi->iface->ifname, pi->r->handle
+				    , NIPQUAD(pi->r->sel.saddr)
+				    , pi->r->sel.prefixlen_s
+				    , NIPQUAD(pi->r->sel.daddr)
+				    , pi->r->sel.prefixlen_d
+				    , -err, strerror(-err));
+		rb_erase(&pi->r->node, &pi->side->rules);
+		FREE(pi->r);
+		goto err;
+	}
+
+	log_message(LOG_INFO, "flower: flower-xfrm: adding XFRM-Policy="
+			      "{src:%u.%u.%u.%u/%d, dst:%u.%u.%u.%u/%d,"
+			      " ifindex:%d, dir:in, push-vlan:%u, handle:0x%x}"
+			    , NIPQUAD(pi->r->sel.saddr), pi->r->sel.prefixlen_s
+			    , NIPQUAD(pi->r->sel.daddr), pi->r->sel.prefixlen_d
+			    , pi->iface->ifindex, pi->r->push_vlan_id
+			    , pi->r->handle);
 	if (pi->state)
 		pi->state->succeeded++;
  err:
@@ -243,9 +362,10 @@ flower_install_done(int err, void *ctx)
 }
 
 static int
-flower_policy_add(struct interface *iface, struct xfrm_policy *p,
-		  struct flower_replay_state *state)
+flower_policy_add_out(struct interface *iface, struct xfrm_policy *p,
+		      struct flower_replay_state *state)
 {
+	struct fswan_flower_side *side = &iface->flower->out;
 	struct flower_pending_install *pi;
 	struct fswan_flower_rule *r;
 	uint16_t vlan_id = 0;
@@ -253,16 +373,16 @@ flower_policy_add(struct interface *iface, struct xfrm_policy *p,
 
 	/* Idempotent because load-existing-xfrm-policy redispatches a
 	 * policy that furious-mode already replayed on this iface. */
-	if (flower_rule_find(iface, p))
+	if (flower_rule_find(side, p))
 		return 0;
 	if (flower_egress_resolve(iface, p, &vlan_id) < 0)
 		return -1;
 
 	/* Must precede live rules, otherwise mlx5 extends the flow group
 	 * and unbinds live mlx5_fc counters from the periodic refresh. */
-	if (!iface->flower->warmed_up) {
-		flower_warmup_pin(iface, vlan_id);
-		iface->flower->warmed_up = true;
+	if (!side->warmed_up) {
+		flower_warmup_pin_out(iface, vlan_id);
+		side->warmed_up = true;
 	}
 
 	PMALLOC(r);
@@ -272,17 +392,18 @@ flower_policy_add(struct interface *iface, struct xfrm_policy *p,
 	if (!pi)
 		goto err_r;
 
-	flower_rule_init_from_policy(r, iface->flower->next_handle++,
-				     vlan_id, p);
+	flower_rule_init_from_policy(r, side->next_handle++, p);
+	r->match_vlan_id = vlan_id;
 	pi->r = r;
 	pi->iface = iface;
+	pi->side = side;
 	pi->state = state;
 
-	err = fswan_netlink_flower_filter_add_pipelined(iface->ifindex,
+	err = fswan_netlink_flower_filter_add_pipelined(iface->ifindex, 0,
 							r->handle, &r->sel,
-							r->vlan_id,
+							r->match_vlan_id,
 							iface->ifindex,
-							flower_install_done,
+							flower_install_done_out,
 							pi);
 	if (err) {
 		log_message(LOG_INFO, "flower: %s: pipelined send failed"
@@ -300,8 +421,104 @@ flower_policy_add(struct interface *iface, struct xfrm_policy *p,
 }
 
 static int
-flower_policy_del(struct interface *iface, struct xfrm_policy *p)
+flower_install_in(struct interface *iface, struct fswan_flower_side *side,
+		  struct fswan_flower_rule *r,
+		  struct flower_replay_state *state)
 {
+	struct fswan_flower_inbound_args a = {
+		.chain		= side->chain,
+		.handle		= r->handle,
+		.sel		= r->sel,
+		.push_vlan_id	= r->push_vlan_id,
+		.redirect_ifindex = iface->ifindex,
+	};
+	struct flower_pending_install *pi;
+	int ret;
+
+	memcpy(a.dst_mac, r->dst_mac, ETH_ALEN);
+	memcpy(a.src_mac, r->src_mac, ETH_ALEN);
+
+	PMALLOC(pi);
+	if (!pi)
+		return -1;
+	pi->r = r;
+	pi->iface = iface;
+	pi->side = side;
+	pi->state = state;
+
+	ret = fswan_netlink_flower_filter_add_in_pipelined(iface->ifindex, &a,
+							   flower_install_done_in,
+							   pi);
+	if (ret) {
+		log_message(LOG_INFO, "flower: %s: pipelined in-send failed"
+				      " (err=%d)"
+				    , iface->ifname, ret);
+		FREE(pi);
+		return -1;
+	}
+	return 0;
+}
+
+static int
+flower_policy_add_in(struct interface *iface, struct xfrm_policy *p,
+		     struct flower_replay_state *state)
+{
+	struct fswan_flower_side *side = iface->flower->in;
+	struct fswan_flower_rule *r;
+	int ret;
+
+	if (flower_rule_find(side, p))
+		return 0;
+
+	PMALLOC(r);
+	if (!r)
+		return -1;
+
+	flower_rule_init_from_policy(r, side->next_handle++, p);
+
+	if (flower_resolve_in_prep(iface, r) < 0) {
+		FREE(r);
+		return -1;
+	}
+
+	rb_add(&r->node, &side->rules, flower_rule_less);
+
+	if (!side->warmed_up) {
+		flower_warmup_pin_in(iface, side->chain, r->push_vlan_id);
+		side->warmed_up = true;
+	}
+
+	ret = flower_resolve_in_neigh(iface, r);
+	if (ret == -EAGAIN) {
+		/* Parked, install fires when RTM_NEWNEIGH lands. */
+		return 0;
+	}
+
+	if (flower_install_in(iface, side, r, state) < 0)
+		goto err_erase;
+	return 0;
+
+ err_erase:
+	rb_erase(&r->node, &side->rules);
+	FREE(r);
+	return -1;
+}
+
+static int
+flower_policy_add(struct interface *iface, struct xfrm_policy *p, int dir,
+		  struct flower_replay_state *state)
+{
+	if (dir == XFRM_POLICY_OUT)
+		return flower_policy_add_out(iface, p, state);
+	if (dir == XFRM_POLICY_IN && iface->flower->in)
+		return flower_policy_add_in(iface, p, state);
+	return 0;
+}
+
+static int
+flower_policy_del_out(struct interface *iface, struct xfrm_policy *p)
+{
+	struct fswan_flower_side *side = &iface->flower->out;
 	struct fswan_flower_rule *r;
 	int err;
 
@@ -309,20 +526,56 @@ flower_policy_del(struct interface *iface, struct xfrm_policy *p)
 	 * the kernel before we look up the rule. */
 	fswan_netlink_flower_filter_drain();
 
-	r = flower_rule_find(iface, p);
+	r = flower_rule_find(side, p);
 	if (!r)
 		return 0;
 
-	err = fswan_netlink_flower_filter_del(iface->ifindex, r->handle);
+	err = fswan_netlink_flower_filter_del(iface->ifindex, 0, r->handle);
 	if (err)
 		log_message(LOG_INFO, "flower: %s: filter del failed for"
 				      " handle:0x%x (errno=%d %s)"
 				    , iface->ifname, r->handle
 				    , -err, strerror(-err));
 
-	rb_erase(&r->node, &iface->flower->rules);
+	rb_erase(&r->node, &side->rules);
 	FREE(r);
 	return err;
+}
+
+static int
+flower_policy_del_in(struct interface *iface, struct xfrm_policy *p)
+{
+	struct fswan_flower_side *side = iface->flower->in;
+	struct fswan_flower_rule *r;
+	int err;
+
+	fswan_netlink_flower_filter_drain();
+
+	r = flower_rule_find(side, p);
+	if (!r)
+		return 0;
+
+	err = fswan_netlink_flower_filter_del(iface->ifindex, side->chain,
+					      r->handle);
+	if (err)
+		log_message(LOG_INFO, "flower: %s: inbound filter del failed"
+				      " for handle:0x%x (errno=%d %s)"
+				    , iface->ifname, r->handle
+				    , -err, strerror(-err));
+
+	rb_erase(&r->node, &side->rules);
+	FREE(r);
+	return err;
+}
+
+static int
+flower_policy_del(struct interface *iface, struct xfrm_policy *p, int dir)
+{
+	if (dir == XFRM_POLICY_OUT)
+		return flower_policy_del_out(iface, p);
+	if (dir == XFRM_POLICY_IN && iface->flower->in)
+		return flower_policy_del_in(iface, p);
+	return 0;
 }
 
 
@@ -331,25 +584,55 @@ flower_policy_del(struct interface *iface, struct xfrm_policy *p)
  *	chain. Handle stays in IDR range so del actually removes the rule.
  */
 static int
-flower_capability_probe(struct interface *iface)
+flower_capability_probe_out(struct interface *iface)
 {
-	struct fswan_flower_sel sel = {
-		.saddr		= 0xffffffff,	/* 255.255.255.255 */
-		.daddr		= 0xffffffff,
-		.prefixlen_s	= 32,
-		.prefixlen_d	= 32,
-	};
-	const uint32_t probe_handle = 0x7ffffffeU;
 	int err;
 
-	err = fswan_netlink_flower_filter_add(iface->ifindex, probe_handle,
-					      &sel, 0, iface->ifindex);
+	err = fswan_netlink_flower_filter_add(iface->ifindex, 0,
+					      FLOWER_PROBE_HANDLE,
+					      &flower_never_match_sel, 0,
+					      iface->ifindex);
 	if (err)
 		return err;
 
-	err = fswan_netlink_flower_filter_del(iface->ifindex, probe_handle);
+	err = fswan_netlink_flower_filter_del(iface->ifindex, 0,
+					      FLOWER_PROBE_HANDLE);
 	if (err)
 		log_message(LOG_INFO, "flower: %s: probe rule del failed"
+				      " (errno=%d %s)"
+				    , iface->ifname, -err, strerror(-err));
+	return 0;
+}
+
+/*
+ *	Inbound probe. Exercises the full action chain (pedit-eth +
+ *	vlan-push + mirred) at the configured chain. Failure means the
+ *	kernel doesnt support post-decrypt feature or the firmware
+ *	refuses INSERT_HDR.
+ */
+static int
+flower_capability_probe_in(struct interface *iface, uint16_t chain)
+{
+	struct fswan_flower_inbound_args a = {
+		.chain		= chain,
+		.handle		= FLOWER_PROBE_HANDLE,
+		.dst_mac	= { 0x02, 0, 0, 0, 0, 0x02 },
+		.push_vlan_id	= 1,
+		.redirect_ifindex = iface->ifindex,
+	};
+	int err;
+
+	a.sel = flower_never_match_sel;
+	memcpy(a.src_mac, iface->hw_addr, ETH_ALEN);
+
+	err = fswan_netlink_flower_filter_add_in(iface->ifindex, &a);
+	if (err)
+		return err;
+
+	err = fswan_netlink_flower_filter_del(iface->ifindex, chain,
+					      FLOWER_PROBE_HANDLE);
+	if (err)
+		log_message(LOG_INFO, "flower: %s: probe-in rule del failed"
 				      " (errno=%d %s)"
 				    , iface->ifname, -err, strerror(-err));
 	return 0;
@@ -362,19 +645,35 @@ flower_capability_probe(struct interface *iface)
  * counters when extending the flow group.
  */
 static void
-flower_warmup_pin(struct interface *iface, uint16_t vlan_id)
+flower_warmup_pin_out(struct interface *iface, uint16_t vlan_id)
 {
-	struct fswan_flower_sel sel = {
-		.saddr		= 0xffffffff,
-		.daddr		= 0xffffffff,
-		.prefixlen_s	= 32,
-		.prefixlen_d	= 32,
-	};
-	const uint32_t warm_handle = 0x7fffffffU;
+	fswan_netlink_flower_filter_add_pipelined(iface->ifindex, 0,
+						  FLOWER_WARMUP_HANDLE,
+						  &flower_never_match_sel,
+						  vlan_id, iface->ifindex,
+						  NULL, NULL);
+}
 
-	fswan_netlink_flower_filter_add_pipelined(iface->ifindex, warm_handle,
-						  &sel, vlan_id,
-						  iface->ifindex, NULL, NULL);
+/* Inbound warmup-pin. The hairpin pair is scoped per
+ * (src_netdev, dst_netdev, chain), so chain-N needs its own pin
+ * even when chain-0 is already pinned. push-vlan matches the first
+ * live rule to share the mlx5 reformat-insert context. */
+static void
+flower_warmup_pin_in(struct interface *iface, uint16_t chain,
+		     uint16_t push_vlan_id)
+{
+	struct fswan_flower_inbound_args a = {
+		.chain		= chain,
+		.handle		= FLOWER_WARMUP_HANDLE,
+		.dst_mac	= { 0x02, 0, 0, 0, 0, 0x02 },
+		.push_vlan_id	= push_vlan_id,
+		.redirect_ifindex = iface->ifindex,
+	};
+
+	a.sel = flower_never_match_sel;
+	memcpy(a.src_mac, iface->hw_addr, ETH_ALEN);
+	fswan_netlink_flower_filter_add_in_pipelined(iface->ifindex, &a,
+						     NULL, NULL);
 }
 
 
@@ -391,11 +690,12 @@ flower_replay_cb(struct xfrm_policy *p, void *ctx)
 		return 0;
 	if (p->ifindex != c->iface->ifindex)
 		return 0;
-	if (p->dir != XFRM_POLICY_OUT)
-		return 0;
 
-	c->state->attempted++;
-	flower_policy_add(c->iface, p, c->state);
+	if (p->dir == XFRM_POLICY_OUT ||
+	    (p->dir == XFRM_POLICY_IN && c->iface->flower->in)) {
+		c->state->attempted++;
+		flower_policy_add(c->iface, p, p->dir, c->state);
+	}
 	return 0;
 }
 
@@ -413,7 +713,7 @@ flower_replay_existing(struct interface *iface)
 
 	if (state.attempted)
 		log_message(LOG_INFO, "flower: %s: replay installed %d/%d"
-				      " outbound policies"
+				      " policies"
 				    , iface->ifname
 				    , state.succeeded, state.attempted);
 }
@@ -430,15 +730,9 @@ flower_cache_cmp(const void *a, const void *b)
 
 	if (ea->ifindex != eb->ifindex)
 		return ea->ifindex - eb->ifindex;
-	if (ea->sel.saddr != eb->sel.saddr)
-		return (ea->sel.saddr < eb->sel.saddr) ? -1 : 1;
-	if (ea->sel.daddr != eb->sel.daddr)
-		return (ea->sel.daddr < eb->sel.daddr) ? -1 : 1;
-	if (ea->sel.prefixlen_s != eb->sel.prefixlen_s)
-		return (ea->sel.prefixlen_s < eb->sel.prefixlen_s) ? -1 : 1;
-	if (ea->sel.prefixlen_d != eb->sel.prefixlen_d)
-		return (ea->sel.prefixlen_d < eb->sel.prefixlen_d) ? -1 : 1;
-	return 0;
+	if (ea->chain != eb->chain)
+		return (int)ea->chain - (int)eb->chain;
+	return flower_sel_cmp(&ea->sel, &eb->sel);
 }
 
 static void
@@ -461,6 +755,7 @@ flower_cache_dump_cb(const struct fswan_flower_sel *sel,
 
 	e = &c->e[c->n++];
 	e->ifindex = bc->ifindex;
+	e->chain = bc->chain;
 	e->sel = *sel;
 	e->pkts = pkts;
 	e->bytes = bytes;
@@ -485,8 +780,15 @@ fswan_flower_counter_cache_begin(void)
 		if (!iface->flower)
 			continue;
 		bc.ifindex = iface->ifindex;
-		fswan_netlink_flower_dump(iface->ifindex,
+		bc.chain = 0;
+		fswan_netlink_flower_dump(iface->ifindex, 0,
 					  flower_cache_dump_cb, &bc);
+		if (iface->flower->in) {
+			bc.chain = iface->flower->in->chain;
+			fswan_netlink_flower_dump(iface->ifindex,
+						  iface->flower->in->chain,
+						  flower_cache_dump_cb, &bc);
+		}
 	}
 
 	if (c->n > 1)
@@ -506,11 +808,13 @@ fswan_flower_counter_cache_end(void)
 }
 
 static bool
-flower_cache_lookup(int ifindex, const struct fswan_flower_rule *r,
+flower_cache_lookup(int ifindex, uint16_t chain,
+		    const struct fswan_flower_rule *r,
 		    uint64_t *pkts, uint64_t *bytes)
 {
 	struct flower_cache_entry key = {
 		.ifindex	= ifindex,
+		.chain		= chain,
 		.sel		= r->sel,
 	};
 	struct flower_cache_entry *found;
@@ -530,10 +834,131 @@ flower_cache_lookup(int ifindex, const struct fswan_flower_rule *r,
 
 
 /*
+ *	Event hooks. Neigh update/delete are selective (key by nh_addr).
+ *	Inbound rebuild is full re-resolve, fired when hairpin or route
+ *	inputs flip.
+ */
+static void
+flower_rule_reinstall(struct interface *iface,
+		      struct fswan_flower_side *side,
+		      struct fswan_flower_rule *r, bool was_installed)
+{
+	if (was_installed)
+		fswan_netlink_flower_filter_del(iface->ifindex, side->chain,
+						r->handle);
+	flower_install_in(iface, side, r, NULL);
+}
+
+static void
+flower_neigh_update_iface(struct interface *iface, uint32_t addr,
+			  const uint8_t *lladdr)
+{
+	struct fswan_flower_side *side = iface->flower->in;
+	struct fswan_flower_rule *r;
+	bool was_installed;
+
+	rb_for_each_entry(r, &side->rules, node) {
+		if (r->nh_addr != addr)
+			continue;
+		was_installed = !ETHER_IS_ZERO(r->dst_mac);
+		if (was_installed &&
+		    memcmp(r->dst_mac, lladdr, ETH_ALEN) == 0)
+			continue;
+		memcpy(r->dst_mac, lladdr, ETH_ALEN);
+		flower_rule_reinstall(iface, side, r, was_installed);
+	}
+}
+
+void
+fswan_flower_neigh_update(uint32_t addr, const uint8_t *lladdr,
+			  __attribute__((unused)) int ifindex)
+{
+	struct interface *iface;
+
+	list_for_each_entry(iface, &daemon_data->interfaces, next)
+		if (iface->flower && iface->flower->in)
+			flower_neigh_update_iface(iface, addr, lladdr);
+}
+
+static void
+flower_neigh_delete_iface(struct interface *iface, uint32_t addr)
+{
+	struct fswan_flower_side *side = iface->flower->in;
+	struct fswan_flower_rule *r;
+
+	rb_for_each_entry(r, &side->rules, node) {
+		if (r->nh_addr != addr)
+			continue;
+		if (ETHER_IS_ZERO(r->dst_mac))
+			continue;
+		fswan_netlink_flower_filter_del(iface->ifindex, side->chain,
+						r->handle);
+		memset(r->dst_mac, 0, ETH_ALEN);
+	}
+}
+
+void
+fswan_flower_neigh_delete(uint32_t addr)
+{
+	struct interface *iface;
+
+	list_for_each_entry(iface, &daemon_data->interfaces, next)
+		if (iface->flower && iface->flower->in)
+			flower_neigh_delete_iface(iface, addr);
+}
+
+void
+fswan_flower_inbound_rebuild(struct interface *iface)
+{
+	struct fswan_flower_side *side;
+	struct fswan_flower_rule *r;
+	uint8_t old_dst[ETH_ALEN];
+	uint16_t old_push_vlan;
+	bool was_installed;
+
+	if (!iface->flower || !iface->flower->in)
+		return;
+	side = iface->flower->in;
+
+	rb_for_each_entry(r, &side->rules, node) {
+		memcpy(old_dst, r->dst_mac, ETH_ALEN);
+		old_push_vlan = r->push_vlan_id;
+		was_installed = !ETHER_IS_ZERO(old_dst);
+
+		if (flower_resolve_in_prep(iface, r) < 0) {
+			if (was_installed) {
+				fswan_netlink_flower_filter_del(iface->ifindex,
+								side->chain,
+								r->handle);
+				memset(r->dst_mac, 0, ETH_ALEN);
+			}
+			continue;
+		}
+
+		memset(r->dst_mac, 0, ETH_ALEN);
+		if (flower_resolve_in_neigh(iface, r) == -EAGAIN) {
+			if (was_installed)
+				fswan_netlink_flower_filter_del(iface->ifindex,
+								side->chain,
+								r->handle);
+			continue;
+		}
+
+		if (was_installed &&
+		    old_push_vlan == r->push_vlan_id &&
+		    memcmp(old_dst, r->dst_mac, ETH_ALEN) == 0)
+			continue;
+
+		flower_rule_reinstall(iface, side, r, was_installed);
+	}
+}
+
+
+/*
  *	Helpers
  */
 int
-fswan_flower_enable(struct interface *iface)
+fswan_flower_enable(struct interface *iface, uint16_t chain)
 {
 	char driver[32];
 	int err;
@@ -562,9 +987,9 @@ fswan_flower_enable(struct interface *iface)
 		return -1;
 	}
 
-	err = flower_capability_probe(iface);
+	err = flower_capability_probe_out(iface);
 	if (err) {
-		log_message(LOG_INFO, "flower: %s: capability probe failed"
+		log_message(LOG_INFO, "flower: %s: outbound probe failed"
 				      " (errno=%d %s)"
 				    , iface->ifname, -err, strerror(-err));
 		fswan_netlink_flower_clsact(iface->ifindex, false);
@@ -576,16 +1001,48 @@ fswan_flower_enable(struct interface *iface)
 		fswan_netlink_flower_clsact(iface->ifindex, false);
 		return -1;
 	}
-	iface->flower->next_handle = 1;
+	iface->flower->out.next_handle = 1;
+
+	/* When the inbound probe fails, outbound stays active and inbound
+	 * falls back to XDP. */
+	err = flower_capability_probe_in(iface, chain);
+	if (err) {
+		log_message(LOG_INFO, "flower-mode: %s: post-decrypt probe"
+				      " failed (errno=%d %s); inbound stays on"
+				      " XDP, outbound active"
+				    , iface->ifname, -err, strerror(-err));
+	} else {
+		PMALLOC(iface->flower->in);
+		if (iface->flower->in) {
+			iface->flower->in->next_handle = 1;
+			iface->flower->in->chain = chain;
+			log_message(LOG_INFO, "flower-mode: %s: hardware"
+					      " offload active at inbound and"
+					      " outbound (post-decrypt chain %u)"
+					    , iface->ifname, chain);
+		}
+	}
+
 	flower_replay_existing(iface);
 	return 0;
+}
+
+static void
+flower_side_cleanup(struct interface *iface, struct fswan_flower_side *side)
+{
+	struct fswan_flower_rule *r, *tmp;
+
+	rb_for_each_entry_safe(r, tmp, &side->rules, node) {
+		fswan_netlink_flower_filter_del(iface->ifindex, side->chain,
+						r->handle);
+		rb_erase(&r->node, &side->rules);
+		FREE(r);
+	}
 }
 
 void
 fswan_flower_disable(struct interface *iface)
 {
-	struct fswan_flower_rule *r, *tmp;
-
 	if (!iface->flower)
 		return;
 
@@ -593,10 +1050,11 @@ fswan_flower_disable(struct interface *iface)
 	 * rb_add into the tree we are about to walk. */
 	fswan_netlink_flower_filter_drain();
 
-	rb_for_each_entry_safe(r, tmp, &iface->flower->rules, node) {
-		fswan_netlink_flower_filter_del(iface->ifindex, r->handle);
-		rb_erase(&r->node, &iface->flower->rules);
-		FREE(r);
+	flower_side_cleanup(iface, &iface->flower->out);
+	if (iface->flower->in) {
+		flower_side_cleanup(iface, iface->flower->in);
+		FREE(iface->flower->in);
+		iface->flower->in = NULL;
 	}
 
 	fswan_netlink_flower_clsact(iface->ifindex, false);
@@ -608,10 +1066,14 @@ int
 fswan_flower_xfrm_action(int action, struct interface *iface,
 			 struct xfrm_policy *p)
 {
+	int dir = __test_bit(XFRM_POLICY_FL_OUT_BIT, &p->flags)
+		  ? XFRM_POLICY_OUT
+		  : XFRM_POLICY_IN;
+
 	if (action == XFRM_MSG_NEWPOLICY)
-		return flower_policy_add(iface, p, NULL);
+		return flower_policy_add(iface, p, dir, NULL);
 	if (action == XFRM_MSG_DELPOLICY)
-		return flower_policy_del(iface, p);
+		return flower_policy_del(iface, p, dir);
 	return 0;
 }
 
@@ -620,6 +1082,7 @@ fswan_flower_policy_counters(struct interface *iface,
 			     const struct xfrm_policy *p,
 			     uint64_t *pkts, uint64_t *bytes)
 {
+	struct fswan_flower_side *side;
 	struct fswan_flower_rule *r;
 
 	*pkts = 0;
@@ -628,14 +1091,21 @@ fswan_flower_policy_counters(struct interface *iface,
 	if (!iface->flower)
 		return false;
 
-	r = flower_rule_find(iface, p);
+	if (p->dir == XFRM_POLICY_OUT)
+		side = &iface->flower->out;
+	else if (p->dir == XFRM_POLICY_IN && iface->flower->in)
+		side = iface->flower->in;
+	else
+		return false;
+
+	r = flower_rule_find(side, p);
 	if (!r)
 		return false;
 
-	if (flower_cache_lookup(iface->ifindex, r, pkts, bytes))
+	if (flower_cache_lookup(iface->ifindex, side->chain, r, pkts, bytes))
 		return true;
 
-	fswan_netlink_flower_filter_stats(iface->ifindex, r->handle,
-					  pkts, bytes);
+	fswan_netlink_flower_filter_stats(iface->ifindex, side->chain,
+					  r->handle, pkts, bytes);
 	return true;
 }
