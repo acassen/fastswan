@@ -52,6 +52,7 @@ struct fswan_flower_inbound_args {
 	uint8_t			src_mac[ETH_ALEN];
 	uint16_t		push_vlan_id;	/* 0 = no vlan push */
 	int			redirect_ifindex;
+	bool			decrement_ttl;
 };
 
 
@@ -68,7 +69,8 @@ int fswan_netlink_flower_destroy(void);
 int fswan_netlink_flower_clsact(int ifindex, bool add);
 int fswan_netlink_flower_filter_add(int ifindex, uint16_t chain, uint32_t handle,
 				    const struct fswan_flower_sel *sel,
-				    uint16_t vlan_id, int redirect_ifindex);
+				    uint16_t vlan_id, int redirect_ifindex,
+				    bool decrement_ttl);
 int fswan_netlink_flower_filter_del(int ifindex, uint16_t chain, uint32_t handle);
 int fswan_netlink_flower_filter_stats(int ifindex, uint16_t chain, uint32_t handle,
 				      uint64_t *pkts, uint64_t *bytes);
@@ -80,6 +82,7 @@ int fswan_netlink_flower_filter_add_pipelined(int ifindex, uint16_t chain,
 					      const struct fswan_flower_sel *sel,
 					      uint16_t vlan_id,
 					      int redirect_ifindex,
+					      bool decrement_ttl,
 					      fswan_flower_install_cb cb,
 					      void *ctx);
 int fswan_netlink_flower_filter_add_in(int ifindex,

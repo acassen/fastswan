@@ -59,6 +59,7 @@ struct fswan_flower_side {
 struct fswan_flower {
 	struct fswan_flower_side	out;	/* always present */
 	struct fswan_flower_side	*in;	/* allocated on inbound probe success */
+	bool				decrement_ttl;
 };
 
 

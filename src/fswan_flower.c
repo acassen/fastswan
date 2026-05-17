@@ -403,6 +403,7 @@ flower_policy_add_out(struct interface *iface, struct xfrm_policy *p,
 							r->handle, &r->sel,
 							r->match_vlan_id,
 							iface->ifindex,
+							iface->flower->decrement_ttl,
 							flower_install_done_out,
 							pi);
 	if (err) {
@@ -431,6 +432,7 @@ flower_install_in(struct interface *iface, struct fswan_flower_side *side,
 		.sel		= r->sel,
 		.push_vlan_id	= r->push_vlan_id,
 		.redirect_ifindex = iface->ifindex,
+		.decrement_ttl	= iface->flower->decrement_ttl,
 	};
 	struct flower_pending_install *pi;
 	int ret;
@@ -588,10 +590,12 @@ flower_capability_probe_out(struct interface *iface)
 {
 	int err;
 
+	/* Probe with TTL-dec to exercise the widest action chain. Live
+	 * rules drop it when the operator has not opted in. */
 	err = fswan_netlink_flower_filter_add(iface->ifindex, 0,
 					      FLOWER_PROBE_HANDLE,
 					      &flower_never_match_sel, 0,
-					      iface->ifindex);
+					      iface->ifindex, true);
 	if (err)
 		return err;
 
@@ -605,10 +609,9 @@ flower_capability_probe_out(struct interface *iface)
 }
 
 /*
- *	Inbound probe. Exercises the full action chain (pedit-eth +
- *	vlan-push + mirred) at the configured chain. Failure means the
- *	kernel doesnt support post-decrypt feature or the firmware
- *	refuses INSERT_HDR.
+ *	Inbound probe. Exercises the full action chain at the configured
+ *	chain. Failure means the kernel doesnt support post-decrypt feature
+ *	or the firmware refuses INSERT_HDR.
  */
 static int
 flower_capability_probe_in(struct interface *iface, uint16_t chain)
@@ -619,6 +622,7 @@ flower_capability_probe_in(struct interface *iface, uint16_t chain)
 		.dst_mac	= { 0x02, 0, 0, 0, 0, 0x02 },
 		.push_vlan_id	= 1,
 		.redirect_ifindex = iface->ifindex,
+		.decrement_ttl	= true,
 	};
 	int err;
 
@@ -651,6 +655,7 @@ flower_warmup_pin_out(struct interface *iface, uint16_t vlan_id)
 						  FLOWER_WARMUP_HANDLE,
 						  &flower_never_match_sel,
 						  vlan_id, iface->ifindex,
+						  iface->flower->decrement_ttl,
 						  NULL, NULL);
 }
 
@@ -668,6 +673,7 @@ flower_warmup_pin_in(struct interface *iface, uint16_t chain,
 		.dst_mac	= { 0x02, 0, 0, 0, 0, 0x02 },
 		.push_vlan_id	= push_vlan_id,
 		.redirect_ifindex = iface->ifindex,
+		.decrement_ttl	= iface->flower->decrement_ttl,
 	};
 
 	a.sel = flower_never_match_sel;

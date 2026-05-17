@@ -485,20 +485,22 @@ fswan_netlink_flower_clsact(int ifindex, bool add)
 
 
 /*
- *	Direction-specific action chain builder. Returns the next prio so
- *	flower_filter_send_msg can append the trailing mirred-redirect.
+ *	Direction-specific action chain builder, optional. Returns the next
+ *	prio for the trailing mirred-redirect appended by flower_filter_send_msg.
  */
 typedef int (*flower_build_actions_cb)(struct nlmsghdr *n, size_t maxlen,
 				       int prio, const void *ctx);
 
 /*
- *	RTM_NEWTFILTER builder shared by both directions. Returns the seq
- *	so the pipelined path can match the ACK later.
+ *	RTM_NEWTFILTER builder shared by both directions. Wraps the common
+ *	pedit-ttl prefix and mirred-redirect suffix around the caller's
+ *	direction-specific actions. Returns the seq so the pipelined path
+ *	can match the ACK later.
  */
 static int
 flower_filter_send_msg(int ifindex, uint16_t chain, uint32_t handle,
 		       const struct fswan_flower_sel *sel, uint16_t vlan_id,
-		       int redirect_ifindex,
+		       int redirect_ifindex, bool decrement_ttl,
 		       flower_build_actions_cb build_actions, const void *actx,
 		       uint32_t *seq_out)
 {
@@ -520,7 +522,7 @@ flower_filter_send_msg(int ifindex, uint16_t chain, uint32_t handle,
 		.t.tcm_handle = handle,
 	};
 	struct rtattr *opts_nest, *act_nest;
-	int err, prio;
+	int err, prio = 1;
 
 	addattr_tca_chain(&req.nlh, sizeof(req), chain);
 	addattr_l(&req.nlh, sizeof(req), TCA_KIND, "flower", sizeof("flower"));
@@ -533,7 +535,10 @@ flower_filter_send_msg(int ifindex, uint16_t chain, uint32_t handle,
 
 	act_nest = addattr_nest(&req.nlh, sizeof(req),
 				TCA_FLOWER_ACT | NLA_F_NESTED);
-	prio = build_actions(&req.nlh, sizeof(req), 1, actx);
+	if (decrement_ttl)
+		addattr_action_pedit_ttl(&req.nlh, sizeof(req), prio++);
+	if (build_actions)
+		prio = build_actions(&req.nlh, sizeof(req), prio, actx);
 	addattr_action_mirred(&req.nlh, sizeof(req), prio, redirect_ifindex);
 	addattr_nest_end(&req.nlh, act_nest);
 
@@ -545,14 +550,6 @@ flower_filter_send_msg(int ifindex, uint16_t chain, uint32_t handle,
 	if (seq_out)
 		*seq_out = req.nlh.nlmsg_seq;
 	return 0;
-}
-
-static int
-flower_build_actions_out(struct nlmsghdr *n, size_t maxlen, int prio,
-			 __attribute__((unused)) const void *ctx)
-{
-	addattr_action_pedit_ttl(n, maxlen, prio++);
-	return prio;
 }
 
 static int
@@ -570,7 +567,8 @@ flower_build_actions_in(struct nlmsghdr *n, size_t maxlen, int prio,
 int
 fswan_netlink_flower_filter_add(int ifindex, uint16_t chain, uint32_t handle,
 				const struct fswan_flower_sel *sel,
-				uint16_t vlan_id, int redirect_ifindex)
+				uint16_t vlan_id, int redirect_ifindex,
+				bool decrement_ttl)
 {
 	uint32_t seq;
 	int err;
@@ -581,8 +579,8 @@ fswan_netlink_flower_filter_add(int ifindex, uint16_t chain, uint32_t handle,
 		fswan_netlink_flower_filter_drain();
 
 	err = flower_filter_send_msg(ifindex, chain, handle, sel, vlan_id,
-				     redirect_ifindex,
-				     flower_build_actions_out, NULL, &seq);
+				     redirect_ifindex, decrement_ttl,
+				     NULL, NULL, &seq);
 	if (err < 0)
 		return err;
 	return flower_recv(seq, NULL, NULL);
@@ -594,6 +592,7 @@ fswan_netlink_flower_filter_add_pipelined(int ifindex, uint16_t chain,
 					  const struct fswan_flower_sel *sel,
 					  uint16_t vlan_id,
 					  int redirect_ifindex,
+					  bool decrement_ttl,
 					  fswan_flower_install_cb cb,
 					  void *ctx)
 {
@@ -608,8 +607,8 @@ fswan_netlink_flower_filter_add_pipelined(int ifindex, uint16_t chain,
 	}
 
 	err = flower_filter_send_msg(ifindex, chain, handle, sel, vlan_id,
-				     redirect_ifindex,
-				     flower_build_actions_out, NULL, &seq);
+				     redirect_ifindex, decrement_ttl,
+				     NULL, NULL, &seq);
 	if (err < 0)
 		return err;
 
@@ -628,7 +627,7 @@ fswan_netlink_flower_filter_add_in(int ifindex,
 		fswan_netlink_flower_filter_drain();
 
 	err = flower_filter_send_msg(ifindex, a->chain, a->handle, &a->sel, 0,
-				     a->redirect_ifindex,
+				     a->redirect_ifindex, a->decrement_ttl,
 				     flower_build_actions_in, a, &seq);
 	if (err < 0)
 		return err;
@@ -651,7 +650,7 @@ fswan_netlink_flower_filter_add_in_pipelined(int ifindex,
 	}
 
 	err = flower_filter_send_msg(ifindex, a->chain, a->handle, &a->sel, 0,
-				     a->redirect_ifindex,
+				     a->redirect_ifindex, a->decrement_ttl,
 				     flower_build_actions_in, a, &seq);
 	if (err < 0)
 		return err;

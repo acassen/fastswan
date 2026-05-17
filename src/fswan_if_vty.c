@@ -667,6 +667,35 @@ ALIAS(no_if_flower_mode,
       "no furious-mode",
       "Alias of no flower-mode\n")
 
+DEFUN(if_flower_decrement_ttl,
+      if_flower_decrement_ttl_cmd,
+      "flower-decrement-ttl",
+      "Prepend `pedit ex munge ip ttl dec` to every flower rule on this"
+      " interface, both directions. Default leaves TTL untouched.\n")
+{
+	struct interface *iface = vty->index;
+
+	if (!iface->flower) {
+		vty_out(vty, "%% flower-mode is not enabled on %s%s"
+			   , iface->ifname, VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+	iface->flower->decrement_ttl = true;
+	return CMD_SUCCESS;
+}
+
+DEFUN(no_if_flower_decrement_ttl,
+      no_if_flower_decrement_ttl_cmd,
+      "no flower-decrement-ttl",
+      "Drop the TTL-decrement action from flower rules on this interface\n")
+{
+	struct interface *iface = vty->index;
+
+	if (iface->flower)
+		iface->flower->decrement_ttl = false;
+	return CMD_SUCCESS;
+}
+
 
 /*
  *	Show commands
@@ -901,6 +930,9 @@ interface_config_write(struct vty *vty)
 					   , VTY_NEWLINE);
 			else
 				vty_out(vty, " flower-mode%s", VTY_NEWLINE);
+			if (iface->flower->decrement_ttl)
+				vty_out(vty, " flower-decrement-ttl%s",
+					     VTY_NEWLINE);
 		}
 		vty_out(vty, " %sshutdown%s"
 			   , __test_bit(FSWAN_INTERFACE_FL_SHUTDOWN_BIT, &iface->flags) ? "" : "no "
@@ -933,6 +965,8 @@ cmd_ext_interface_install(void)
 	install_element(INTERFACE_NODE, &if_furious_mode_chain_cmd);
 	install_element(INTERFACE_NODE, &no_if_flower_mode_cmd);
 	install_element(INTERFACE_NODE, &no_if_furious_mode_cmd);
+	install_element(INTERFACE_NODE, &if_flower_decrement_ttl_cmd);
+	install_element(INTERFACE_NODE, &no_if_flower_decrement_ttl_cmd);
 	install_element(INTERFACE_NODE, &if_shutdown_cmd);
 	install_element(INTERFACE_NODE, &if_no_shutdown_cmd);
 
