@@ -1725,7 +1725,7 @@ vty_listen_unix(struct thread_master *m, const char *path,
 		goto err;
 	}
 
-	ret = fchown(accept_sock, uid, gid);
+	ret = chown(path, uid, gid);
 	if (ret < 0) {
 		log_message(LOG_INFO, "Vty error cant chown %s (%m)", path);
 		close(accept_sock);
@@ -1733,7 +1733,7 @@ vty_listen_unix(struct thread_master *m, const char *path,
 	}
 
 	if (gid != (gid_t)-1) {
-		ret = fchmod(accept_sock, 0770);
+		ret = chmod(path, 0770);
 		if (ret < 0) {
 			log_message(LOG_INFO, "Vty error cant chmod %s (%m)", path);
 			close(accept_sock);

@@ -63,9 +63,7 @@ struct fswan_flower {
 };
 
 
-/* Public surface. Outbound and inbound are independent: either can run on
- * flower while the other falls back to XDP. The wrapper struct comes and
- * goes with the first/last active side. */
+/* Prototypes */
 int fswan_flower_enable_out(struct interface *iface);
 int fswan_flower_enable_in(struct interface *iface, uint16_t chain);
 void fswan_flower_disable_out(struct interface *iface);
@@ -79,7 +77,6 @@ bool fswan_flower_policy_counters(struct interface *iface,
 void fswan_flower_counter_cache_begin(void);
 void fswan_flower_counter_cache_end(void);
 
-/* Event hooks called from the netlink filter and from fswan_hairpin. */
 void fswan_flower_neigh_update(uint32_t addr, const uint8_t *lladdr,
 			       int ifindex);
 void fswan_flower_neigh_delete(uint32_t addr);

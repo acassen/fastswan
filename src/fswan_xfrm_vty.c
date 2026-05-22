@@ -104,6 +104,34 @@ struct xfrm_stat_section {
 	const char	*section;
 };
 
+struct ipsec_summary {
+	/* SA aggregates */
+	uint32_t	sa_total;
+	uint32_t	sa_in;
+	uint32_t	sa_out;
+	uint32_t	sa_v4;
+	uint32_t	sa_v6;
+	uint64_t	sa_in_pkts;
+	uint64_t	sa_in_bytes;
+	uint64_t	sa_out_pkts;
+	uint64_t	sa_out_bytes;
+	uint64_t	sa_integrity_failed;
+	uint64_t	sa_replay_drops;
+
+	/* Policy aggregates */
+	uint32_t	pol_total;
+	uint32_t	pol_in;
+	uint32_t	pol_out;
+	uint32_t	pol_fwd;
+	uint32_t	pol_xdp;
+	uint32_t	pol_flower_hw;
+	uint32_t	pol_kernel;
+
+	/* Distinct offload ifindex set, small bounded */
+	int		iface_set[16];
+	uint32_t	iface_set_n;
+};
+
 /* Fast-path mirrors carrying the policy */
 enum xfrm_policy_backend {
 	XFRM_BACKEND_XDP	= 1 << 0,
@@ -631,26 +659,26 @@ xfrm_policy_probe_backends(const struct xfrm_policy *p,
 			   uint64_t *pkts_out, uint64_t *bytes_out)
 {
 	uint32_t backends = 0;
+	uint64_t bpf_pkts = 0, bpf_bytes = 0;
 	uint64_t flower_pkts = 0, flower_bytes = 0;
 	struct interface *iface;
-
-	*pkts_out = 0;
-	*bytes_out = 0;
 
 	if (p->family == AF_INET &&
 	    fswan_bpf_xfrm_policy_counters_by_selector_sum(
 			p->saddr.a4, p->prefixlen_s,
 			p->daddr.a4, p->prefixlen_d,
-			pkts_out, bytes_out))
+			&bpf_pkts, &bpf_bytes))
 		backends |= XFRM_BACKEND_XDP;
 
 	iface = fswan_if_get_by_ifindex(p->ifindex, false);
 	if (iface && iface->flower &&
-	    fswan_flower_policy_counters(iface, p, &flower_pkts, &flower_bytes)) {
+	    fswan_flower_policy_counters(iface, p, &flower_pkts, &flower_bytes))
 		backends |= XFRM_BACKEND_FLOWER_HW;
-		*pkts_out += flower_pkts;
-		*bytes_out += flower_bytes;
-	}
+
+	if (pkts_out)
+		*pkts_out = bpf_pkts + flower_pkts;
+	if (bytes_out)
+		*bytes_out = bpf_bytes + flower_bytes;
 
 	return backends;
 }
@@ -1103,6 +1131,181 @@ err:
 
 
 /*
+ *	show ipsec summary  -  one-shot count + cumulative-counter overview
+ */
+static void
+summary_track_iface(struct ipsec_summary *s, int ifindex)
+{
+	uint32_t i;
+
+	if (ifindex <= 0)
+		return;
+
+	for (i = 0; i < s->iface_set_n; i++)
+		if (s->iface_set[i] == ifindex)
+			return;
+
+	if (s->iface_set_n < ARRAY_SIZE(s->iface_set))
+		s->iface_set[s->iface_set_n++] = ifindex;
+}
+
+static int
+summary_sa_cb(struct xfrm_sa *sa, void *ctx)
+{
+	struct ipsec_summary *s = ctx;
+
+	s->sa_total++;
+
+	if (sa->offload_flags & XFRM_OFFLOAD_INBOUND) {
+		s->sa_in++;
+		s->sa_in_pkts += sa->curlft.packets;
+		s->sa_in_bytes += sa->curlft.bytes;
+	} else {
+		s->sa_out++;
+		s->sa_out_pkts += sa->curlft.packets;
+		s->sa_out_bytes += sa->curlft.bytes;
+	}
+
+	if (sa->family == AF_INET6)
+		s->sa_v6++;
+	else
+		s->sa_v4++;
+
+	s->sa_integrity_failed += sa->stats.integrity_failed;
+	s->sa_replay_drops += sa->stats.replay;
+
+	summary_track_iface(s, sa->offload_ifindex);
+	return 0;
+}
+
+static int
+summary_pol_cb(struct xfrm_policy *p, void *ctx)
+{
+	struct ipsec_summary *s = ctx;
+	uint32_t backends;
+
+	s->pol_total++;
+
+	switch (p->dir) {
+	case XFRM_POLICY_IN:
+		s->pol_in++;
+		break;
+	case XFRM_POLICY_OUT:
+		s->pol_out++;
+		break;
+	case XFRM_POLICY_FWD:
+		s->pol_fwd++;
+		break;
+	}
+
+	/* Mirror xfrm_policy_offload_str() ordering so per-policy counts add up */
+	backends = xfrm_policy_probe_backends(p, NULL, NULL);
+	if (backends & XFRM_BACKEND_XDP)
+		s->pol_xdp++;
+	else if (backends & XFRM_BACKEND_FLOWER_HW)
+		s->pol_flower_hw++;
+	else
+		s->pol_kernel++;
+
+	summary_track_iface(s, p->ifindex);
+	return 0;
+}
+
+static void
+summary_render_traffic(struct vty *vty, const char *label,
+		       uint64_t pkts, uint64_t bytes)
+{
+	char bs[24];
+
+	xfrm_bytes_str(bytes, bs, sizeof(bs));
+	vty_out(vty, "    %-16s %lu pkts / %s bytes%s",
+		     label, (unsigned long) pkts, bs, VTY_NEWLINE);
+}
+
+static void
+summary_render_devs(struct vty *vty, const struct ipsec_summary *s)
+{
+	char dev[IF_NAMESIZE];
+	uint32_t i;
+
+	vty_out(vty, "  %-18s", "Offload devs");
+	if (!s->iface_set_n)
+		vty_out(vty, "(none)");
+	for (i = 0; i < s->iface_set_n; i++) {
+		xfrm_dev_str(s->iface_set[i], dev, sizeof(dev));
+		vty_out(vty, "%s%s", i ? "   " : "", dev);
+	}
+	vty_out(vty, "%s", VTY_NEWLINE);
+}
+
+static void
+summary_render_sa(struct vty *vty, const struct ipsec_summary *s)
+{
+	vty_out(vty, "  %-18s%u%s", "SAs", s->sa_total, VTY_NEWLINE);
+	vty_out(vty, "    %-16s in %u   out %u%s",
+		     "direction", s->sa_in, s->sa_out, VTY_NEWLINE);
+	vty_out(vty, "    %-16s v4 %u   v6 %u%s",
+		     "family", s->sa_v4, s->sa_v6, VTY_NEWLINE);
+	vty_out(vty, "    %-16s integrity-failed %lu   replay-drop %lu%s",
+		     "HW errors",
+		     (unsigned long) s->sa_integrity_failed,
+		     (unsigned long) s->sa_replay_drops, VTY_NEWLINE);
+	summary_render_traffic(vty, "ESP in", s->sa_in_pkts, s->sa_in_bytes);
+	summary_render_traffic(vty, "ESP out", s->sa_out_pkts, s->sa_out_bytes);
+}
+
+static void
+summary_render_pol(struct vty *vty, const struct ipsec_summary *s)
+{
+	vty_out(vty, "  %-18s%u%s", "Policies", s->pol_total, VTY_NEWLINE);
+	vty_out(vty, "    %-16s in %u   out %u   fwd %u%s",
+		     "direction", s->pol_in, s->pol_out, s->pol_fwd, VTY_NEWLINE);
+	vty_out(vty, "    %-16s xdp %u   flower-hw %u   kernel %u%s",
+		     "backend", s->pol_xdp, s->pol_flower_hw, s->pol_kernel,
+		     VTY_NEWLINE);
+}
+
+static void
+summary_render(struct vty *vty, const struct ipsec_summary *s)
+{
+	vty_out(vty, "IPsec summary%s%s", VTY_NEWLINE, VTY_NEWLINE);
+	summary_render_sa(vty, s);
+	vty_out(vty, "%s", VTY_NEWLINE);
+	summary_render_pol(vty, s);
+	vty_out(vty, "%s", VTY_NEWLINE);
+	summary_render_devs(vty, s);
+}
+
+DEFUN(show_ipsec_summary,
+      show_ipsec_summary_cmd,
+      "show ipsec summary",
+      SHOW_STR
+      "IPsec\n"
+      "One-shot count + cumulative-counters overview"
+      " (kernel ground truth, packet-offload only)\n")
+{
+	struct ipsec_summary s = {};
+	int rc = CMD_SUCCESS;
+
+	if (fswan_netlink_xfrm_sa_walk(summary_sa_cb, &s, 0) < 0) {
+		vty_out(vty, "%% Error dumping XFRM SAs%s", VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+
+	fswan_flower_counter_cache_begin();
+	if (fswan_netlink_xfrm_policy_walk(summary_pol_cb, &s) < 0) {
+		vty_out(vty, "%% Error dumping XFRM policies%s", VTY_NEWLINE);
+		rc = CMD_WARNING;
+	}
+	fswan_flower_counter_cache_end();
+
+	if (rc == CMD_SUCCESS)
+		summary_render(vty, &s);
+	return rc;
+}
+
+
+/*
  *	show ipsec stats  -  /proc/net/xfrm_stat snapshot
  */
 static const struct xfrm_stat_section xfrm_stat_sections[] = {
@@ -1179,6 +1382,7 @@ DEFUN(show_ipsec_stats,
  */
 static struct cmd_element *const show_cmds[] = {
 	&show_ipsec_cmd,
+	&show_ipsec_summary_cmd,
 	&show_ipsec_stats_cmd,
 	&show_ipsec_sa_cmd,
 	&show_ipsec_sa_peer4_cmd,
