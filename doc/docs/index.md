@@ -16,5 +16,7 @@ fastSwan is free software; you can redistribute it and/or modify it under the te
 
 ---
 IPsec is natively supported by the Linux Kernel via its XFRM layer. This feature is widely used in broadband and mobile network infrastructures. strongSwan software has become the de facto standard for running IPsec on Linux systems. Thanks to the efforts and long-term support of the strongSwan team, it has also become a reference cornerstone for interoperability. In this context, fastSwan is a side companion of strongSwan for its data-path which makes extensive use of eBPF/XDP. Netlink broadcast channel with the Linux Kernel is used to mirror XFRM policies to eBPF program. This eBPF program is loaded at the XDP layer and is routing/forwarding traffic directly at the netdevice ingress. Kernel XFRM is then offloaded and forwarding is done directly in the context of the netdevice driver. fastSwan only handles traffic for XFRM policies using HW offload.
+
+fastSwan also ships a `flower-mode` (aka `furious-mode`) forwarding model that pushes the forwarding path into the NIC via tc flower.
 <p style="text-align: center"><img src="assets/global.png"></p>
 

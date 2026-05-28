@@ -1,5 +1,5 @@
 site_name: fastSwan
-copyright: Copyright &copy; 2025 Alexandre Cassen
+copyright: Copyright &copy; 2025-2026 Alexandre Cassen
 repo_url: https://github.com/acassen/fastswan
 repo_name: fastSwan
 theme:
@@ -37,6 +37,14 @@ markdown_extensions:
 plugins:
   - search
   - tags
+  - glightbox:
+      touchNavigation: true
+      loop: false
+      effect: zoom
+      zoomable: true
+      draggable: true
+      skip_classes:
+        - no-lightbox
   - privacy:
       enabled: true
       cache: true

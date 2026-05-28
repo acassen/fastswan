@@ -3,3 +3,22 @@
   background-image: url("/images/background.png");
   height: 150px;
 }
+
+:root {
+  --md-code-font: "DejaVu Sans Mono", "Liberation Mono",
+                  "Menlo", "Consolas", monospace, monospace;
+}
+
+.md-typeset pre > code,
+.md-typeset code {
+  font-family: var(--md-code-font);
+  font-variant-ligatures: none;
+  line-height: 1.15;
+}
+
+.md-typeset .highlight pre,
+.md-typeset pre code {
+  font-family: var(--md-code-font);
+  font-variant-ligatures: none;
+  line-height: 1.15;
+}
