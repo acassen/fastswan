@@ -14,7 +14,7 @@ A typical entry:
 ```
 interface p0
  bpf-program xdp-xfrm
- route-to-nexthop 10.0.0.1
+ hairpin-to-nexthop 10.0.0.1
  flower-inbound-mode
  flower-outbound-mode
  flower-decrement-ttl
