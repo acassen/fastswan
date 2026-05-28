@@ -23,16 +23,14 @@ fastSwan now builds with meson. Clone the tree with its submodules
 ```
 git clone --recursive git@github.com:acassen/fastswan.git
 cd fastswan
-meson setup builddir
-meson compile -C builddir
+make
 ```
 
 The build produces the daemon and the companion eBPF object:
 
 ```
-$ ls builddir/fastswan builddir/src/bpf/xfrm_offload.bpf
-builddir/fastswan
-builddir/src/bpf/xfrm_offload.bpf
+$ ls bin/*
+bin/fastswan bin/xfrm_offload.bpf
 ```
 
 ## Configuration file
@@ -61,7 +59,7 @@ bpf-program xdp-xfrm
 !
 interface p0
  bpf-program xdp-xfrm
- route-to-nexthop 10.0.0.1
+ hairpin-to-nexthop 10.0.0.1
  flower-inbound-mode
  flower-outbound-mode
  flower-decrement-ttl
@@ -72,7 +70,7 @@ interface p0.502
 !
 interface p1
  bpf-program xdp-xfrm
- route-to-nexthop 10.1.0.1
+ hairpin-to-nexthop 10.1.0.1
  flower-inbound-mode
  flower-outbound-mode
  flower-decrement-ttl
