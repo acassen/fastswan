@@ -97,7 +97,7 @@ so the same config works across hardware generations.
   post-decrypt mlx5 patches).
 * `flower-decrement-ttl` keeps the TTL decrement in HW through
   `pedit ttl dec`.
-* `route-to-nexthop` resolves the LAN-side next hop once at warmup,
+* `hairpin-to-nexthop` resolves the LAN-side next hop once at warmup,
   so the fast path skips the kernel FIB lookup.
 * `daemon-cpu`, `daemon-priority`, `lock-memory` and `cpu-mask` pin
   the control plane out of the isolated dataplane CPUs.
@@ -107,7 +107,7 @@ so the same config works across hardware generations.
 Start the daemon either with the SysV/systemd unit or by hand:
 
 ```
-$ sudo builddir/fastswan --help
+$ sudo fastswan --help
 fastswan v1.x.y
 Copyright (C) 2026 Alexandre Cassen, <acassen@gmail.com>
 libbpf v1.6
@@ -120,7 +120,7 @@ Usage:
   fastswan -h
   fastswan -v
 
-$ sudo builddir/fastswan --dont-fork --log-console --log-detail \
+$ sudo fastswan --dont-fork --log-console --log-detail \
         -f /etc/fastswan/fastswan.conf
 ```
 

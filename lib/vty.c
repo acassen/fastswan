@@ -1668,6 +1668,44 @@ vty_listen(struct thread_master *m, struct sockaddr_storage *addr)
 	return -1;
 }
 
+/* Pin the bound inode then chown/chmod via /proc/self/fd so a path
+ * swap cannot redirect us, fchmod is a no-op on a socket fd. */
+static int
+vty_set_unix_perm(const char *path, uid_t uid, gid_t gid)
+{
+	char procpath[32];
+	struct stat st;
+	int fd, ret = -1;
+
+	fd = open(path, O_PATH | O_NOFOLLOW);
+	if (fd < 0) {
+		log_message(LOG_INFO, "Vty error cant open %s (%m)", path);
+		return -1;
+	}
+
+	if (fstat(fd, &st) < 0 || !S_ISSOCK(st.st_mode)) {
+		log_message(LOG_INFO, "Vty error %s is not the bound socket", path);
+		goto end;
+	}
+
+	snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", fd);
+
+	if (chown(procpath, uid, gid) < 0) {
+		log_message(LOG_INFO, "Vty error cant chown %s (%m)", path);
+		goto end;
+	}
+
+	if (gid != (gid_t)-1 && chmod(procpath, 0770) < 0) {
+		log_message(LOG_INFO, "Vty error cant chmod %s (%m)", path);
+		goto end;
+	}
+
+	ret = 0;
+  end:
+	close(fd);
+	return ret;
+}
+
 /* Start unix domain socket listener */
 int
 vty_listen_unix(struct thread_master *m, const char *path,
@@ -1725,20 +1763,9 @@ vty_listen_unix(struct thread_master *m, const char *path,
 		goto err;
 	}
 
-	ret = chown(path, uid, gid);
-	if (ret < 0) {
-		log_message(LOG_INFO, "Vty error cant chown %s (%m)", path);
+	if (vty_set_unix_perm(path, uid, gid) < 0) {
 		close(accept_sock);
 		goto err;
-	}
-
-	if (gid != (gid_t)-1) {
-		ret = chmod(path, 0770);
-		if (ret < 0) {
-			log_message(LOG_INFO, "Vty error cant chmod %s (%m)", path);
-			close(accept_sock);
-			goto err;
-		}
 	}
 
 	ret = listen(accept_sock, 16);
