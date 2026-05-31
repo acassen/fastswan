@@ -1668,12 +1668,11 @@ vty_listen(struct thread_master *m, struct sockaddr_storage *addr)
 	return -1;
 }
 
-/* Pin the bound inode then chown/chmod via /proc/self/fd so a path
- * swap cannot redirect us, fchmod is a no-op on a socket fd. */
+/* Pin the bound inode and set ownership through an O_PATH fd so a path
+ * swap cannot redirect us, the mode is baked by umask at bind time. */
 static int
 vty_set_unix_perm(const char *path, uid_t uid, gid_t gid)
 {
-	char procpath[32];
 	struct stat st;
 	int fd, ret = -1;
 
@@ -1683,25 +1682,13 @@ vty_set_unix_perm(const char *path, uid_t uid, gid_t gid)
 		return -1;
 	}
 
-	if (fstat(fd, &st) < 0 || !S_ISSOCK(st.st_mode)) {
+	if (fstat(fd, &st) < 0 || !S_ISSOCK(st.st_mode))
 		log_message(LOG_INFO, "Vty error %s is not the bound socket", path);
-		goto end;
-	}
-
-	snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", fd);
-
-	if (chown(procpath, uid, gid) < 0) {
+	else if (fchownat(fd, "", uid, gid, AT_EMPTY_PATH) < 0)
 		log_message(LOG_INFO, "Vty error cant chown %s (%m)", path);
-		goto end;
-	}
+	else
+		ret = 0;
 
-	if (gid != (gid_t)-1 && chmod(procpath, 0770) < 0) {
-		log_message(LOG_INFO, "Vty error cant chmod %s (%m)", path);
-		goto end;
-	}
-
-	ret = 0;
-  end:
 	close(fd);
 	return ret;
 }
@@ -1746,7 +1733,7 @@ vty_listen_unix(struct thread_master *m, const char *path,
 	usock->uid = uid;
 	usock->gid = gid;
 
-	old_mask = umask(0077);
+	old_mask = umask(gid != (gid_t)-1 ? 0007 : 0077);
 
 	accept_sock = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (accept_sock < 0) {
