@@ -534,6 +534,156 @@ host is no longer the bottleneck.
     allowfullscreen></iframe>
 </p>
 
+## IPsec tunnel mode in switchdev
+
+The switchdev refusal above is the bare enable. With dmfs steering
+and `encap-mode none` set on the eswitch first, the firmware does
+enable `ipsec_packet` on a VF and offloads **transport** mode. It
+still refuses **tunnel** mode at SA install. This probe runs on the
+Nvidia-validated DOCA-OFED stack (Ubuntu 24.04, kernel 6.8, same
+28.48.1000 firmware), so it is not a custom-kernel artifact.
+
+The full reproduction setup follows, split into the eswitch enable, the
+clear-text network, the tc-flower hairpin, the strongSwan isolation
+on the VF netdev, and the swanctl config it loads:
+
+=== "eswitch enable"
+	```bash
+	echo 1 > /sys/class/net/p0/device/sriov_numvfs
+	devlink dev param set pci/0000:31:00.0 \
+	    name flow_steering_mode value dmfs cmode runtime
+	devlink dev eswitch set pci/0000:31:00.0 encap-mode none
+	devlink dev eswitch set pci/0000:31:00.0 mode switchdev
+
+	# the VF must be unbound before ipsec_packet is enabled
+	echo 0000:31:00.2 > /sys/bus/pci/drivers/mlx5_core/unbind
+	devlink port function set pci/0000:31:00.0/1 ipsec_packet enable
+	echo 0000:31:00.2 > /sys/bus/pci/drivers/mlx5_core/bind
+	```
+
+=== "Network"
+	```bash
+	ip link set p0 up
+	ip link set ens1f0r0 up
+	ip link add link p0 name p0.502 type vlan id 502
+	ip link set dev p0.502 up
+	ip a a 10.0.0.254/24 dev p0.502
+	ip r a 16.0.0.0/8 via 10.0.0.1
+	```
+
+=== "Qdisc"
+	```bash
+	tc qdisc add dev p0 ingress
+	tc qdisc add dev ens1f0r0 ingress
+	tc filter add dev p0 parent ffff: protocol all chain 0 flower \
+	    action mirred egress redirect dev ens1f0r0
+	tc filter add dev ens1f0r0 parent ffff: protocol all chain 0 flower \
+	    action mirred egress redirect dev p0
+	```
+
+=== "Isolation (netns)"
+	```bash
+	# strongSwan must run on the VF in its own netns or a VM so IKE
+	# binds to the isolated VF netdev
+	ip netns add vf0
+	ip link set ens1f0v0 netns vf0
+	ip -n vf0 link set lo up
+	ip -n vf0 link set ens1f0v0 up
+	ip -n vf0 a a 123.0.0.1/16 dev ens1f0v0
+	ip -n vf0 r a 123.2.0.0/16 via 123.0.0.254
+	ip -n vf0 r a 48.0.0.0/8 via 123.0.0.254
+
+	ip netns exec vf0 ipsec start
+	ip netns exec vf0 swanctl --load-all
+	ip netns exec vf0 swanctl -i --child gw
+	```
+
+=== "swanctl.conf"
+	```
+	connections {
+	  B-TO-B {
+	    local_addrs  = 123.0.0.1
+	    remote_addrs = 123.2.0.1
+
+	    local {
+	        auth = psk
+	        id = ipsec-gw
+	    }
+	    remote {
+	        auth = psk
+	        id = ipsec-enodeb
+	    }
+
+	    children {
+	      gw {
+	        local_ts = 16.0.0.0/16
+	        remote_ts = 48.0.0.0/16
+	        mode = tunnel
+	        policies_fwd_out = yes
+
+            #   Transport mode configuration
+            #local_ts = 123.0.0.1/32
+            #remote_ts = 123.2.0.1/32
+            #mode = transport
+
+	        esp_proposals = aes128gcm128-x25519-esn
+	        hw_offload = packet
+	      }
+	    }
+	    version = 2
+	    mobike = no
+	    reauth_time = 0
+	    proposals = aes128-sha256-x25519
+	  }
+	}
+
+	secrets {
+	  ike-GW {
+	    id-1 = ipsec-gw
+	    id-2 = ipsec-enodeb
+	    secret = 'TopSecret'
+	  }
+	}
+	```
+
+With `mode = tunnel` and `hw_offload = packet` on the child, IKE
+completes, then the outbound SA install is firmware-refused:
+
+```
+[KNL] received netlink error: mlx5_core: Device failed to offload this state (22)
+[KNL] unable to add SAD entry with SPI c7925e3c (FAILED)
+[IKE] unable to install outbound IPsec SA (SAD) in kernel
+```
+
+dmesg carries the matching firmware syndrome:
+
+```
+mlx5_core 0000:31:00.2: SET_FLOW_TABLE_ENTRY(0x936) op_mod(0x0) failed, status bad parameter(0x3), syndrome (0x65c1fb), err(-22)
+mlx5_core 0000:31:00.2: tx_add_rule:2231: fail to add TX ipsec rule err=-22
+```
+
+The identical setup with `mode = transport` establishes the
+CHILD_SA with no error.
+
+A VF is not the uplink representor, so `ipsec_tx()` routes the SA
+to the NIC `EGRESS_IPSEC` table, the same one a legacy PF uses, and
+the driver builds a byte-identical request. The tunnel reformat
+clears the driver gate because `mlx5_eswitch_block_encap()`
+short-circuits for a VF and reports the reformat allowed without
+ever claiming the PF eswitch encap engine that owns it. The
+firmware then refuses the uncoordinated VF-egress
+`L2_TO_L3_ESP_TUNNEL` reformat under switchdev arbitration, which
+is the `0x65c1fb` syndrome. Transport mode escapes the contention
+because `ADD_ESP_TRANSPORT` is a separate engine, and legacy PF
+escapes it because no eswitch owns the engine, so the firmware
+hands it to the IPsec table.
+
+The HW can build the reformat, since legacy mode works...
+What blocks tunnel mode is that switchdev places the encap engine
+under eswitch arbitration, and this PSID's firmware will not release
+it to a VF-egress IPsec tunnel rule. The solution seems to be a firmware
+that implements the VF-egress tunnel reformat.
+
 ## Test scenarios
 
 The bench compares four incremental configurations, all built on

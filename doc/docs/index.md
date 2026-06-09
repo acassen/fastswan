@@ -20,3 +20,7 @@ IPsec is natively supported by the Linux Kernel via its XFRM layer. This feature
 fastSwan also ships a `flower-mode` (aka `furious-mode`) forwarding model that pushes the forwarding path into the NIC via tc flower.
 <p style="text-align: center"><img src="assets/global.png"></p>
 
+## Updates
+
+**2026-06-09.** The ConnectX-7 benchmark gains a section on [IPsec tunnel mode in switchdev](Nvidia-ConnectX-7-Benchmark/#ipsec-tunnel-mode-in-switchdev).
+
