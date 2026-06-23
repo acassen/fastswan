@@ -1,7 +1,7 @@
 ---
 title: Nvidia ConnectX-7 by numbers
 ---
-*Alexandre Cassen*, <<acassen@gmail.com>>
+*Alexandre Cassen*, <<acassen@gmail.com>> | *Sebastien Hurtel*, <<sebastienhurtel@gmail.com>>
 
 ---
 
@@ -730,8 +730,8 @@ Three profiles drive the bench, all symmetric in both directions.
 * `MNO-traffic-pattern.py`: 5G-shaped iMIX from the BF3 article,
   162k pps per port at base rate (4G + 5G buckets combined).
   Measured peak per port after TRex amplification: **11.25 Mpps /
-  98.2 Gbps**. The headline profile used to sweep 2k / 4k / 8k
-  IPsec tunnels.
+  98.2 Gbps**. The headline profile used to sweep the 1k
+  to 1.6k IPsec tunnel range.
 * `MNO-mixed-symmetric.py`: stacks the 4G/clients and 4G/cmg iMIXes
   on every port in both directions, 232k pps per port at base
   rate. Measured peak per port after TRex amplification:
@@ -826,72 +826,108 @@ almost the entire `handle_softirqs` frame. The `fastswan`
 cycles are control-plane work like `cmd_exec` and
 `entry_match_by_sa`, not packet forwarding.
 
-## Results: TRex and per-CPU load
+## 1k IPsec tunnels: fib_lookup, XDP Hairpin and Flower
 
-The TRex side shows the wire throughput per scenario, and the
-rxq-cpu side shows the per-RX-queue CPU load on the host. Read
-them together, since the TRex tells whether the wire saturates
-and the rxq-cpu tells how much that wire saturation costs on the
-host.
+The first run sets three models side by side at 1k tunnels, 500 per
+port with traffic both ways. The fourth config, XDP Hairpin plus
+outbound flower, stays in the flamegraph analysis where it shows on
+CPU, not the wire. It asks what hairpinning buys over a FIB lookup, and
+what flower changes once the host leaves the path.
 
-### `ipsec-cx7.py`, 2k tunnels, four-port stress run
+<p style="text-align: center"><img src="assets/results/trex-1k-ipsec.png"></p>
 
-The `ipsec-cx7` profile is the absolute upper-bound run with the
-high-pps iMIX. It is run only against the 2k-tunnel topology,
-since at this pps level the per-tunnel rate already exceeds what
-realistic 4k or 8k topologies would see.
+Throughput here is the TRex aggregate over the two ports p0 and p1,
+loaded equally, so the per-port rate is half. The two XDP variants land
+together at 190.5 Gbps with no loss, so the warmup cache costs nothing
+over the per-packet FIB walk. Flower holds 184.3 Gbps before it drops
+frames, just under the pair, and its latency runs lower in the clean
+region, near 100 µs against 150 µs, though it spikes to the 231 µs at
+3.53 % loss once it saturates. Flower trades a little peak bandwidth for
+steadier, lower latency, the whole point on a mobile edge.
 
-<p style="text-align: center"><img src="assets/trex/trex-2k-ipsec_cx7.png"></p>
-<p style="text-align: center"><img src="assets/rxq-cpu/bench-p0-ipsec-cx7.png"></p>
+<p style="text-align: center"><img src="assets/results/cpu-1k-ipsec.png"></p>
 
-The TRex curve shows the four scenarios next to each other.
-Pure XDP fib_lookup runs out of CPU first, since the FIB lookup
-sits inside the eBPF program and every packet pays for it. XDP
-hairpin holds up better because the FIB tail is gone. XDP
-hairpin plus outbound flower runs higher again, since outbound
-is no longer on the host. Full flower flattens the host CPU.
+On CPU, XDP Hairpin tracks just under fib_lookup, so the cache trims a
+small but real slice of cycles. The line that matters is the flat one,
+flower runs the established flows in the NIC and the dataplane CPUs stay
+at 0 %.
 
-### `MNO-traffic-pattern.py`, 2k tunnels
+From here the bench keeps only XDP Hairpin and Flower. fib_lookup was
+just a reference, since the gain comes from hairpinning, not from where
+the route lookup runs.
 
-The MNO profile is the realistic mobile-network iMIX. The 2k
-configuration is the headline number for the deployed solution.
+## XDP Hairpin under tunnel scaling
 
-<p style="text-align: center"><img src="assets/trex/trex-2k-mno_traffic_profil.png"></p>
-<p style="text-align: center"><img src="assets/rxq-cpu/bench-p0-MNO_traffic_pattern-2k.png"></p>
+This run sweeps the tunnel count from 1k to 1.6k on the XDP Hairpin
+model and reads both the wire and the host.
 
-### `MNO-traffic-pattern.py`, 4k tunnels
+<p style="text-align: center"><img src="assets/results/XDP-Hairpin.png"></p>
 
-Doubling the tunnel count keeps the wire-side numbers in the
-same neighbourhood and confirms that the offload paths stay
-flat as the SA count grows.
+The maximum clean bandwidth falls as the tunnel count climbs, from
+190.5 Gbps at 1k down to 100.4 Gbps at 1.6k. The decline stays close
+to linear, near 150 Gbps lost for every extra 1k tunnels.
 
-<p style="text-align: center"><img src="assets/trex/trex-4k-mno_traffic_profil.png"></p>
-<p style="text-align: center"><img src="assets/rxq-cpu/bench-p0-MNO_traffic_pattern-4k.png"></p>
+<p style="text-align: center"><img src="assets/results/XDP-Hairpin-CPU.png"></p>
 
-### `MNO-traffic-pattern.py`, 8k tunnels
+The host CPU moves the other way and drops as tunnels grow. That reads
+backward until you put it next to the wire, since less traffic gets
+through at high tunnel counts, so the CPUs have less to forward. The
+host is no longer the limit, the NIC and the PCIe path are, which is
+the signature of a hardware bottleneck.
 
-8k tunnels is the largest configuration we exercise on this
-hardware. The numbers stay aligned with the 2k and 4k runs,
-which validates that none of the offload paths carries hidden
-per-SA cost on the dataplane side.
+## Flower Hairpin under tunnel scaling
 
-<p style="text-align: center"><img src="assets/trex/trex-8k-mno_traffic_profil.png"></p>
-<p style="text-align: center"><img src="assets/rxq-cpu/bench-p0-MNO_traffic_pattern-8k.png"></p>
+The same sweep on Flower Hairpin keeps only the TRex side, because the
+host CPU stays flat at zero across every tunnel count and adds nothing
+to read.
 
-### Cross-scenario consolidation on the MNO profile
+<p style="text-align: center"><img src="assets/results/Flower-Hairpin.png"></p>
 
-The next three graphs collapse the per-tunnel-count results into
-one view per scenario, so the impact of tunnel scaling is read
-directly on each scenario's own curve.
+Flower starts close to XDP at 1k with 184.3 Gbps, then falls faster as
+tunnels grow and reaches 80.4 Gbps at 1.6k. A point measured at 1.7k
+holds 78.7 Gbps, only 1.7 Gbps below 1.6k, so the curve settles toward
+a floor near 80 Gbps instead of collapsing.
 
-=== "XDP fib_lookup, 2k/4k/8k"
-	<p style="text-align: center"><img src="assets/trex/trex-XDP_fib_lookup-mno_traffic_pattern.png"></p>
+## XDP vs Flower performance analysis
 
-=== "XDP Hairpin, 2k/4k/8k"
-	<p style="text-align: center"><img src="assets/trex/trex-XDP_Hairpin-mno_traffic_pattern.png"></p>
+<p style="text-align: center"><img src="assets/results/XDP-Hairpin-perf.png"></p>
+<p style="text-align: center"><img src="assets/results/Flower-Hairpin-perf.png"></p>
 
-=== "Flower Hairpin, 2k/4k/8k"
-	<p style="text-align: center"><img src="assets/trex/trex-Flower_Hairpin-mno_traffic_pattern.png"></p>
+Both models lose throughput as the tunnel count climbs. The table lists
+the maximum each sustains before traffic drops.
+
+| Tunnels (k) | XDP (Gbps) | Flower (Gbps) | XDP advantage |
+|-------------|-----------|---------------|---------------|
+| 1.0         | 190.5     | 184.3         | +6.2  (+3%)   |
+| 1.1         | 176.2     | 153.8         | +22.4 (+15%)  |
+| 1.2         | 153.3     | 127.4         | +25.9 (+20%)  |
+| 1.3         | 139.4     | 110.4         | +29.0 (+26%)  |
+| 1.4         | 124.2     | 99.1          | +25.1 (+25%)  |
+| 1.5         | 110.3     | 88.8          | +21.5 (+24%)  |
+| 1.6         | 100.4     | 80.4          | +20.0 (+25%)  |
+
+At 1k the two nearly match, with XDP ahead by 3 %. The gap widens fast
+and holds near 25 % from 1.3k on. Averaged over the sweep XDP sustains
+142 Gbps against 121, about 18 % more headroom.
+
+The two shapes differ. XDP falls almost linearly, about 150 Gbps per
+extra 1k tunnels, while Flower drops faster early then flattens near
+80 Gbps.
+
+XDP stays at or above 100 Gbps throughout, while Flower drops below it
+by 1.4k. The likely cause is flower hardware steering, which pays a
+rising per-flow cost as tunnels grow, while XDP absorbs it more gently.
+
+## XDP vs Flower overall
+
+<p style="text-align: center"><img src="assets/results/XDP-vs-Flower.png"></p>
+
+The last graph overlays both models at 1k, 1.1k and 1.2k on one TRex
+view. At 1k Flower sits right in the performance range and wins on
+latency, which is exactly where it belongs. One step up the picture
+turns, since Flower bandwidth falls away quickly while XDP barely
+moves. Flower buys lower latency when the load fits, and gives up
+throughput headroom in return.
 
 ## Cross-port topology consideration
 
@@ -912,10 +948,25 @@ walls:
 
 ## Conclusion
 
-The CX7 with IPsec packet offload hits its wire ceiling in every
-scenario, reaching about 19.35 Mpps and 97 Gbps per port under the
-`ipsec-cx7` profile, and 11.25 Mpps and 98.2 Gbps per port under the
-realistic `MNO-traffic-pattern` profile. Full flower is the way to
-go because it sustains those numbers while leaving the dataplane
-CPUs at 0 % and the host stays free to run any other workloads in
-parallel.
+At low tunnel counts the CX7 with IPsec packet offload reaches its wire
+ceiling, about 97 Gbps per port under `ipsec-cx7` and 98.2 Gbps under
+the realistic `MNO-traffic-pattern` profile. That ceiling fades as the
+tunnel count grows, since the NIC and PCIe steering path, not the host
+CPU, becomes the limit.
+
+The tradeoff is clear. XDP keeps the higher throughput and degrades
+gently, holding at or above 100 Gbps aggregate through 1.6k tunnels,
+while Flower trades that headroom for 0 % CPU and lower latency where
+the load fits. On a mobile network, where latency matters most, that
+points to flower.
+
+The numbers carry one caveat. The bench loads every tunnel uniformly,
+the worst case for steering cost, while real mobile traffic is not. With
+the usual over-subscription for eNodeB or gNodeB IPsec, the per-tunnel
+ceilings here leave comfortable margin.
+
+That split hints at a path the bench does not walk. A hybrid could let
+flower carry the established tunnels in hardware at 0 % CPU, while XDP
+on the host picks up the new ones as they come up, taking flower's
+efficiency and XDP's headroom at once. Building it is left here as an
+exercise, or a contribution.

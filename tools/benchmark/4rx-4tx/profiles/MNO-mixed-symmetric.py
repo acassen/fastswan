@@ -27,9 +27,9 @@ class STLIPsec:
 
     ip_range: dict[str, IPRange] = {
         "cmg": IPRange(start="16.0.0.1", count=20),
-        "clients": IPRange(start="48.0.0.1", count=10240),
+        "clients": IPRange(start="48.0.0.1", count=500),
         "cmg1": IPRange(start="17.0.0.1", count=20),
-        "clients1": IPRange(start="49.0.0.1", count=10240),
+        "clients1": IPRange(start="49.0.0.1", count=500),
     }
 
     # Lighter (clients) iMIX from ipsec-cx7-multi.py.
@@ -82,8 +82,9 @@ class STLIPsec:
         else:
             cmg_key, clients_key = "cmg1", "clients1"
 
-        # Paired-port offset keeps source IP subsets disjoint between
-        # ports 0/1 (and 2/3) so RSS spreads them differently.
+        # cmg keeps a per-port offset so ports 0/1 (and 2/3) use disjoint
+        # source subsets for RSS spread. cmg does not select the tunnel,
+        # so the offset is harmless on this side.
         pair_index = port_id % 2
 
         cmg_range = self.ip_range[cmg_key]
@@ -97,13 +98,14 @@ class STLIPsec:
             ),
         )
 
+        # No offset on clients: both directions must hit the same /32 set
+        # so each tunnel carries encrypt and decrypt (count == tunnels).
         clients_range = self.ip_range[clients_key]
-        clients_offset = clients_range.count * pair_index
         vm.var(
             name="clients_ip", size=4, op="inc",
-            min_value=str(netaddr.IPAddress(clients_range.start) + clients_offset),
+            min_value=clients_range.start,
             max_value=str(
-                netaddr.IPAddress(clients_range.start) + clients_offset
+                netaddr.IPAddress(clients_range.start)
                 + clients_range.count - (1 if clients_range.count else 0)
             ),
         )

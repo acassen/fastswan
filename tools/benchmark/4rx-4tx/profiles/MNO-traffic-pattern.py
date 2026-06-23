@@ -23,13 +23,18 @@ class STLIPsec:
     directions so encrypt and decrypt CPU load are balanced across the
     two gateways. Both directions carry the same pps and the same
     packet-size mix.
+
+    Both directions share the same client /32 set, so each tunnel carries
+    encrypt and decrypt and clients.count equals the number of active
+    tunnels (count=C -> tunnels 1..C). The cmg side keeps the per-port
+    offset for RSS spread because it does not select the tunnel.
     """
 
     ip_range: dict[str, IPRange] = {
         "cmg":      IPRange(start="16.0.0.1", count=20),
-        "clients":  IPRange(start="48.0.0.1", count=60240),
+        "clients":  IPRange(start="48.0.0.1", count=500),
         "cmg1":     IPRange(start="17.0.0.1", count=20),
-        "clients1": IPRange(start="49.0.0.1", count=60240),
+        "clients1": IPRange(start="49.0.0.1", count=500),
     }
 
     # Single 4G + 5G IMIX, used by every port for both directions.
@@ -64,8 +69,9 @@ class STLIPsec:
         else:
             cmg_key, clients_key = "cmg1", "clients1"
 
-        # Paired-port offset keeps source IP subsets disjoint between
-        # ports 0/1 (and 2/3) so RSS spreads them differently.
+        # cmg keeps a per-port offset so ports 0/1 (and 2/3) use disjoint
+        # source subsets for RSS spread. cmg does not select the tunnel,
+        # so the offset is harmless on this side.
         pair_index = port_id % 2
 
         cmg_range = self.ip_range[cmg_key]
@@ -79,13 +85,14 @@ class STLIPsec:
             ),
         )
 
+        # No offset on clients: both directions must hit the same /32 set
+        # so each tunnel carries encrypt and decrypt (count == tunnels).
         clients_range = self.ip_range[clients_key]
-        clients_offset = clients_range.count * pair_index
         vm.var(
             name="clients_ip", size=4, op="inc",
-            min_value=str(netaddr.IPAddress(clients_range.start) + clients_offset),
+            min_value=clients_range.start,
             max_value=str(
-                netaddr.IPAddress(clients_range.start) + clients_offset
+                netaddr.IPAddress(clients_range.start)
                 + clients_range.count - (1 if clients_range.count else 0)
             ),
         )

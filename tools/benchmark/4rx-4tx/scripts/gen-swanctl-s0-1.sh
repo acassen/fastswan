@@ -12,7 +12,7 @@ TNLCOUNT=$1
 SUBNET_CONNECTED="123"
 SUBNET_ROUTED_LOCAL="17"
 SUBNET_ROUTED_REMOTE="49"
-BITS="24"
+BITS="32"
 OUTPUT="s0-1-$TNLCOUNT.conf"
 
 if [ $TNLCOUNT -gt $((255 * 255)) ]; then
@@ -43,7 +43,7 @@ do
 	children {
 	  tnl-1-$i {
 		local_ts = ${SUBNET_ROUTED_LOCAL}.0.0.0/8
-		remote_ts = ${SUBNET_ROUTED_REMOTE}.$(((i-1) / 255)).$(((i-1) % 255)).0/${BITS}
+		remote_ts = ${SUBNET_ROUTED_REMOTE}.$((i / 65536)).$((i / 256 % 256)).$((i % 256))/${BITS}
 		esp_proposals = aes256gcm128-esn
 		mode = tunnel
 		policies_fwd_out = yes

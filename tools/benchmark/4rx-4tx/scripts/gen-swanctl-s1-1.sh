@@ -1,9 +1,4 @@
 #!/bin/bash
-#
-#	120K Clients considered : adapt BITS to distribute load across
-#	24 : 254
-#	25 : 126
-#	....
 
 if [ "$#" -ne 1 ]; then
         echo "  "$(basename $0)" <tnlcount>"
@@ -17,7 +12,7 @@ TNLCOUNT=$1
 SUBNET_CONNECTED="123"
 SUBNET_ROUTED_LOCAL="49"
 SUBNET_ROUTED_REMOTE="17"
-BITS="24"
+BITS="32"
 OUTPUT="s1-1-$TNLCOUNT.conf"
 
 if [ $TNLCOUNT -gt $((255 * 255)) ]; then
@@ -47,7 +42,7 @@ do
  
 	children {
 	  tnl-1-$i {
-		local_ts = ${SUBNET_ROUTED_LOCAL}.$(((i-1) / 255)).$(((i-1) % 255)).0/${BITS}
+		local_ts = ${SUBNET_ROUTED_LOCAL}.$((i / 65536)).$((i / 256 % 256)).$((i % 256))/${BITS}
 		remote_ts = ${SUBNET_ROUTED_REMOTE}.0.0.0/8
 		esp_proposals = aes256gcm128-esn
 		mode = tunnel
