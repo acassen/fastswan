@@ -40,7 +40,7 @@ The DUT runs on the following hardware:
   NIC mode (legacy eswitch, no switchdev)
 * Userland: strongSwan 6.0, fastSwan
 
-  [Nvidia Bluefield-3 by numbers]: ../Nvidia-Bluefield-3-Benchmark/
+  [Nvidia Bluefield-3 by numbers]: ../Nvidia-Bluefield-3-Benchmark/index.md
 
 ## Typical benchmark testrun
 

@@ -22,5 +22,7 @@ fastSwan also ships a `flower-mode` (aka `furious-mode`) forwarding model that p
 
 ## Updates
 
-**2026-06-09.** The ConnectX-7 benchmark gains a section on [IPsec tunnel mode in switchdev](Nvidia-ConnectX-7-Benchmark/#ipsec-tunnel-mode-in-switchdev).
+**2026-06-23.** The [ConnectX-7 benchmark](Nvidia-ConnectX-7-Benchmark/index.md) has been redone, since the previous run suffered from benchmark protocol setup issues.
+
+**2026-06-09.** The ConnectX-7 benchmark gains a section on [IPsec tunnel mode in switchdev](Nvidia-ConnectX-7-Benchmark/index.md#ipsec-tunnel-mode-in-switchdev).
 
