@@ -152,6 +152,36 @@ flower_egress_resolve(struct interface *iface, struct xfrm_policy *p,
 
 
 /*
+ *	Inbound match-VLAN resolution. The NIC rebuilds the L2 header of
+ *	the decrypted packet and tags it when the tunnel peer is routed
+ *	via a VLAN interface whose real device is the offload device.
+ */
+static uint16_t
+flower_ingress_resolve(struct interface *iface, uint32_t peer)
+{
+	struct interface *vif;
+	uint32_t gw = 0;
+	int oif = 0;
+
+	if (fswan_netlink_route_lookup(peer, &gw, &oif) < 0)
+		return 0;
+
+	vif = fswan_if_get_by_ifindex(oif, true);
+	return (vif && vif->link_iface == iface) ? vif->vlan_id : 0;
+}
+
+/*
+ *	NIC flower cannot pop a VLAN so the rule only matches the ESP VLAN
+ *	when the next hop is tagged too.
+ */
+static uint16_t
+flower_ingress_match(const struct fswan_flower_rule *r)
+{
+	return r->push_vlan_id ? r->match_vlan_id : 0;
+}
+
+
+/*
  *	Inbound two-phase resolver. Two phases so the hard-fail branch
  *	can return before any rb-tree commit, leaving the rule findable
  *	by r->nh_addr when the RTM_NEWNEIGH callback fires. Hairpin tier
@@ -283,7 +313,7 @@ flower_rule_init_from_policy(struct fswan_flower_rule *r, uint32_t handle,
 
 static void flower_warmup_pin_out(struct interface *iface, uint16_t vlan_id);
 static void flower_warmup_pin_in(struct interface *iface, uint16_t chain,
-				 uint16_t push_vlan_id);
+				 const struct fswan_flower_rule *r);
 
 
 /*
@@ -351,11 +381,12 @@ flower_install_done_in(int err, void *ctx)
 
 	log_message(LOG_INFO, "flower: flower-xfrm: adding XFRM-Policy="
 			      "{src:%u.%u.%u.%u/%d, dst:%u.%u.%u.%u/%d,"
-			      " ifindex:%d, dir:in, push-vlan:%u, handle:0x%x}"
+			      " ifindex:%d, dir:in, vlan:%u, push-vlan:%u,"
+			      " handle:0x%x}"
 			    , NIPQUAD(pi->r->sel.saddr), pi->r->sel.prefixlen_s
 			    , NIPQUAD(pi->r->sel.daddr), pi->r->sel.prefixlen_d
-			    , pi->iface->ifindex, pi->r->push_vlan_id
-			    , pi->r->handle);
+			    , pi->iface->ifindex, flower_ingress_match(pi->r)
+			    , pi->r->push_vlan_id, pi->r->handle);
 	if (pi->state)
 		pi->state->succeeded++;
  err:
@@ -431,6 +462,7 @@ flower_install_in(struct interface *iface, struct fswan_flower_side *side,
 		.chain		= side->chain,
 		.handle		= r->handle,
 		.sel		= r->sel,
+		.match_vlan_id	= flower_ingress_match(r),
 		.push_vlan_id	= r->push_vlan_id,
 		.redirect_ifindex = iface->ifindex,
 		.decrement_ttl	= iface->flower->decrement_ttl,
@@ -478,16 +510,26 @@ flower_policy_add_in(struct interface *iface, struct xfrm_policy *p,
 		return -1;
 
 	flower_rule_init_from_policy(r, side->next_handle++, p);
+	if (side->vlan_modify)
+		r->match_vlan_id = flower_ingress_resolve(iface,
+							  p->tmpl_saddr.a4);
 
 	if (flower_resolve_in_prep(iface, r) < 0) {
 		FREE(r);
 		return -1;
 	}
 
+	if (r->match_vlan_id && !r->push_vlan_id)
+		log_message(LOG_INFO, "flower: %s: no VLAN pop in hardware,"
+				      " a peer behind a VLAN interface is not"
+				      " offloaded inbound to an untagged"
+				      " next hop"
+				    , iface->ifname);
+
 	rb_add(&r->node, &side->rules, flower_rule_less);
 
 	if (!side->warmed_up) {
-		flower_warmup_pin_in(iface, side->chain, r->push_vlan_id);
+		flower_warmup_pin_in(iface, side->chain, r);
 		side->warmed_up = true;
 	}
 
@@ -612,15 +654,18 @@ flower_capability_probe_out(struct interface *iface)
 /*
  *	Inbound probe. Exercises the full action chain at the configured
  *	chain. Failure means the kernel doesnt support post-decrypt feature
- *	or the firmware refuses INSERT_HDR.
+ *	or the firmware refuses INSERT_HDR. A tagged match probes the VLAN
+ *	modify that replaces the push.
  */
 static int
-flower_capability_probe_in(struct interface *iface, uint16_t chain)
+flower_capability_probe_in(struct interface *iface, uint16_t chain,
+			   uint16_t match_vlan_id)
 {
 	struct fswan_flower_inbound_args a = {
 		.chain		= chain,
 		.handle		= FLOWER_PROBE_HANDLE,
 		.dst_mac	= { 0x02, 0, 0, 0, 0, 0x02 },
+		.match_vlan_id	= match_vlan_id,
 		.push_vlan_id	= 1,
 		.redirect_ifindex = iface->ifindex,
 		.decrement_ttl	= true,
@@ -662,17 +707,18 @@ flower_warmup_pin_out(struct interface *iface, uint16_t vlan_id)
 
 /* Inbound warmup-pin. The hairpin pair is scoped per
  * (src_netdev, dst_netdev, chain), so chain-N needs its own pin
- * even when chain-0 is already pinned. push-vlan matches the first
- * live rule to share the mlx5 reformat-insert context. */
+ * even when chain-0 is already pinned. Both VLAN ids come from the
+ * first live rule to share its tcf_proto and its mlx5 rewrite context. */
 static void
 flower_warmup_pin_in(struct interface *iface, uint16_t chain,
-		     uint16_t push_vlan_id)
+		     const struct fswan_flower_rule *r)
 {
 	struct fswan_flower_inbound_args a = {
 		.chain		= chain,
 		.handle		= FLOWER_WARMUP_HANDLE,
 		.dst_mac	= { 0x02, 0, 0, 0, 0, 0x02 },
-		.push_vlan_id	= push_vlan_id,
+		.match_vlan_id	= flower_ingress_match(r),
+		.push_vlan_id	= r->push_vlan_id,
 		.redirect_ifindex = iface->ifindex,
 		.decrement_ttl	= iface->flower->decrement_ttl,
 	};
@@ -1068,7 +1114,7 @@ fswan_flower_enable_in(struct interface *iface, uint16_t chain)
 	if (flower_wrapper_ensure(iface) < 0)
 		return -1;
 
-	err = flower_capability_probe_in(iface, chain);
+	err = flower_capability_probe_in(iface, chain, 0);
 	if (err) {
 		log_message(LOG_INFO, "flower: %s: post-decrypt probe failed"
 				      " (errno=%d %s)"
@@ -1084,9 +1130,16 @@ fswan_flower_enable_in(struct interface *iface, uint16_t chain)
 	}
 	iface->flower->in->next_handle = 1;
 	iface->flower->in->chain = chain;
+	iface->flower->in->vlan_modify = !flower_capability_probe_in(iface,
+								    chain, 2);
 	log_message(LOG_INFO, "flower: %s: inbound HW offload active"
 			      " (post-decrypt chain %u)"
 			    , iface->ifname, chain);
+	if (!iface->flower->in->vlan_modify)
+		log_message(LOG_INFO, "flower: %s: no VLAN modify in hardware,"
+				      " a peer behind a VLAN interface is"
+				      " not offloaded inbound"
+				    , iface->ifname);
 
 	flower_replay_existing(iface, XFRM_POLICY_IN);
 	return 0;

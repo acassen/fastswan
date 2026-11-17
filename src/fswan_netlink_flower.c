@@ -400,15 +400,17 @@ addattr_action_pedit_eth(struct nlmsghdr *n, size_t maxlen, int prio,
 
 
 /*
- *	vlan "push" action. Maps to MLX5_REFORMAT_TYPE_INSERT_HDR on NIC RX.
+ *	vlan action that turns the tag of the matched packet into the one
+ *	of the next hop. "push" maps to MLX5_REFORMAT_TYPE_INSERT_HDR on
+ *	NIC RX and "modify" to a modify header.
  */
 static void
-addattr_action_vlan_push(struct nlmsghdr *n, size_t maxlen, int prio,
-			 uint16_t vlan_id)
+addattr_action_vlan(struct nlmsghdr *n, size_t maxlen, int prio,
+		    uint16_t from, uint16_t to)
 {
 	struct tc_vlan parms = {
 		.action		= TC_ACT_PIPE,
-		.v_action	= TCA_VLAN_ACT_PUSH,
+		.v_action	= from ? TCA_VLAN_ACT_MODIFY : TCA_VLAN_ACT_PUSH,
 	};
 	__be16 proto = htons(ETH_P_8021Q);
 	struct rtattr *act_nest, *opts_nest;
@@ -416,7 +418,7 @@ addattr_action_vlan_push(struct nlmsghdr *n, size_t maxlen, int prio,
 	act_nest = flower_action_open(n, maxlen, prio, "vlan");
 	opts_nest = addattr_nest(n, maxlen, TCA_ACT_OPTIONS | NLA_F_NESTED);
 	addattr_l(n, maxlen, TCA_VLAN_PARMS, &parms, sizeof(parms));
-	addattr_l(n, maxlen, TCA_VLAN_PUSH_VLAN_ID, &vlan_id, sizeof(vlan_id));
+	addattr_l(n, maxlen, TCA_VLAN_PUSH_VLAN_ID, &to, sizeof(to));
 	addattr_l(n, maxlen, TCA_VLAN_PUSH_VLAN_PROTOCOL,
 		  &proto, sizeof(proto));
 	addattr_nest_end(n, opts_nest);
@@ -559,8 +561,9 @@ flower_build_actions_in(struct nlmsghdr *n, size_t maxlen, int prio,
 	const struct fswan_flower_inbound_args *a = ctx;
 
 	addattr_action_pedit_eth(n, maxlen, prio++, a->src_mac, a->dst_mac);
-	if (a->push_vlan_id)
-		addattr_action_vlan_push(n, maxlen, prio++, a->push_vlan_id);
+	if (a->push_vlan_id != a->match_vlan_id)
+		addattr_action_vlan(n, maxlen, prio++, a->match_vlan_id,
+				    a->push_vlan_id);
 	return prio;
 }
 
@@ -626,7 +629,8 @@ fswan_netlink_flower_filter_add_in(int ifindex,
 	if (pipeline_n)
 		fswan_netlink_flower_filter_drain();
 
-	err = flower_filter_send_msg(ifindex, a->chain, a->handle, &a->sel, 0,
+	err = flower_filter_send_msg(ifindex, a->chain, a->handle, &a->sel,
+				     a->match_vlan_id,
 				     a->redirect_ifindex, a->decrement_ttl,
 				     flower_build_actions_in, a, &seq);
 	if (err < 0)
@@ -649,7 +653,8 @@ fswan_netlink_flower_filter_add_in_pipelined(int ifindex,
 			return err;
 	}
 
-	err = flower_filter_send_msg(ifindex, a->chain, a->handle, &a->sel, 0,
+	err = flower_filter_send_msg(ifindex, a->chain, a->handle, &a->sel,
+				     a->match_vlan_id,
 				     a->redirect_ifindex, a->decrement_ttl,
 				     flower_build_actions_in, a, &seq);
 	if (err < 0)

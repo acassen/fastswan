@@ -50,7 +50,8 @@ struct fswan_flower_inbound_args {
 	struct fswan_flower_sel	sel;
 	uint8_t			dst_mac[ETH_ALEN];
 	uint8_t			src_mac[ETH_ALEN];
-	uint16_t		push_vlan_id;	/* 0 = no vlan push */
+	uint16_t		match_vlan_id;	/* 0 = untagged after decap */
+	uint16_t		push_vlan_id;	/* 0 = untagged next hop */
 	int			redirect_ifindex;
 	bool			decrement_ttl;
 };

@@ -37,8 +37,6 @@ struct fswan_flower_rule {
 	struct rb_node		node;
 	uint32_t		handle;
 	struct fswan_flower_sel	sel;
-
-	/* outbound */
 	uint16_t		match_vlan_id;
 
 	/* inbound */
@@ -54,6 +52,7 @@ struct fswan_flower_side {
 	struct rb_root		rules;
 	uint16_t		chain;		/* 0 for out, configured value for in */
 	bool			warmed_up;
+	bool			vlan_modify;	/* in: hardware VLAN modify */
 };
 
 struct fswan_flower {
