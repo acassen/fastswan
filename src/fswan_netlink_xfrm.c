@@ -93,6 +93,20 @@ get_nl_msg_type(unsigned type)
 /*
  *	Kernel Netlink reflector
  */
+static void
+xfrm_policy_parse_tmpl(struct rtattr *attr, struct xfrm_policy *p)
+{
+	struct xfrm_user_tmpl *t;
+
+	if (RTA_PAYLOAD(attr) < sizeof(*t))
+		return;
+
+	t = RTA_DATA(attr);
+	p->tmpl_reqid = t->reqid;
+	p->tmpl_saddr = t->saddr;
+	p->tmpl_daddr = t->id.daddr;
+	p->tmpl_mode = t->mode;
+}
 
 /* This one is mostly coming from iproute2 code */
 static int
@@ -185,6 +199,8 @@ xfrm_policy_filter(struct nlmsghdr *n)
 	policy.ifindex = xuo->ifindex;
 	__set_bit((xpinfo->dir == XFRM_POLICY_IN) ? XFRM_POLICY_FL_IN_BIT : XFRM_POLICY_FL_OUT_BIT
 		  , &policy.flags);
+	if (tb[XFRMA_TMPL])
+		xfrm_policy_parse_tmpl(tb[XFRMA_TMPL], &policy);
 
 	return fswan_bpf_xfrm_action(n->nlmsg_type, &policy);
 }
@@ -280,20 +296,6 @@ netlink_xfrm_lookup(void)
 /*
  *	Show-layer SA / policy walkers
  */
-static void
-xfrm_policy_parse_tmpl(struct rtattr *attr, struct xfrm_policy *p)
-{
-	struct xfrm_user_tmpl *t;
-
-	if (RTA_PAYLOAD(attr) < sizeof(*t))
-		return;
-
-	t = RTA_DATA(attr);
-	p->tmpl_reqid = t->reqid;
-	p->tmpl_saddr = t->saddr;
-	p->tmpl_daddr = t->id.daddr;
-	p->tmpl_mode = t->mode;
-}
 
 /* Key bytes are copied only when XFRM_SA_WALK_F_KEYS is set, so the default
  * render path doesn't carry sensitive material. */
